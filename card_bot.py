@@ -18,29 +18,45 @@ logger = logging.getLogger(__name__)
 TELEGRAM_TOKEN = os.getenv("CARD_BOT_TOKEN")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 YOUR_CHAT_ID = int(os.getenv("YOUR_CHAT_ID", "0"))
+LILU_CHAT_ID = int(os.getenv("LILU_CHAT_ID", "0"))
 DB_PATH = os.getenv("DB_PATH", "/tmp/freelance.db")
+USDT_WALLET = os.getenv("USDT_WALLET", "TECM5HuPvi9Z6RNzbHZLtesSkKwHBLJEJc")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 
 user_sessions = {}
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
-    "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8",
-}
+import random
+HEADERS_LIST = [
+    {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/122.0.0.0 Safari/537.36", "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8"},
+    {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Safari/605.1.15", "Accept-Language": "en-US,en;q=0.9"},
+    {"User-Agent": "Feedfetcher-Google; (+http://www.google.com/feedfetcher.html)", "Accept-Language": "en-US,en;q=0.9"},
+]
+HEADERS = HEADERS_LIST[0]
+def get_headers():
+    return random.choice(HEADERS_LIST)
 
 # ═══ ИСТОЧНИКИ ЗАКАЗОВ НА КАРТОЧКИ ═══
 CARD_RSS_FEEDS = [
-    ("https://www.fl.ru/rss/all.xml?category=3", "🇷🇺 FL.ru"),
-    ("https://www.weblancer.net/jobs/feed/?cat=13", "🇷🇺 Weblancer"),
-    ("https://freelance.ru/rss/projects.xml", "🇷🇺 Freelance.ru"),
-    ("https://www.guru.com/jobs/rss/?skill=writing", "🟠 Guru.com"),
-    ("https://www.peopleperhour.com/jobs/rss?service=writing", "🔵 PPH"),
+    # Хабр Фриланс — работает с Railway
+    ("https://freelance.habr.com/tasks.rss?q=карточка+товара", "🟣 Хабр/Карточки"),
+    ("https://freelance.habr.com/tasks.rss?q=wildberries", "🟣 Хабр/WB"),
+    ("https://freelance.habr.com/tasks.rss?q=ozon+описание", "🟣 Хабр/Ozon"),
+    ("https://freelance.habr.com/tasks.rss?q=маркетплейс+текст", "🟣 Хабр/Маркетплейс"),
+    ("https://freelance.habr.com/tasks.rss?q=описание+товара", "🟣 Хабр/Описания"),
+    # We Work Remotely — работает
+    ("https://weworkremotely.com/categories/remote-writing-jobs.rss", "🌍 WWR/Writing"),
+    # ProBlogger
+    ("https://problogger.com/jobs/feed/", "🌍 ProBlogger"),
+    # FL.ru — пробуем с разными UA
+    ("https://www.fl.ru/rss/all.xml?category=3", "🇷🇺 FL.ru/Тексты"),
+    ("https://www.fl.ru/rss/all.xml", "🇷🇺 FL.ru"),
 ]
 
 TG_CARD_CHANNELS = [
-    "wb_sellers_ru",
-    "ozon_sellers",
-    "marketplace_freelance",
+    "wb_help",
+    "ozon_sellers_club",
     "kopiraiting_ru",
+    "freelance_ru",
 ]
 
 # Ключевые слова для заказов на карточки
@@ -665,12 +681,19 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 InlineKeyboardButton("👍 ОК, сдаём!", callback_data=f"done_{job_id}"),
                 InlineKeyboardButton("✏️ Правка", callback_data=f"redo_{job_id}")
             ]]
+            msg = (f"✨ *КАРТОЧКИ ГОТОВЫ!*\n\n📌 *{job['title'][:80]}*\n\n"
+                   f"━━━━━━━━━━\n{result[:2500]}\n━━━━━━━━━━\n\n"
+                   f"*Лила, проверь — отправляем?*")
             await context.bot.send_message(
-                chat_id=YOUR_CHAT_ID,
-                text=f"✨ *КАРТОЧКИ ГОТОВЫ!*\n\n📌 *{job['title'][:80]}*\n\n━━━━━━━━━━\n{result[:2500]}\n━━━━━━━━━━\n\n*Лила, проверь — отправляем?*",
-                parse_mode='Markdown',
-                reply_markup=InlineKeyboardMarkup(keyboard)
+                chat_id=YOUR_CHAT_ID, text=msg,
+                parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard)
             )
+            # Уведомляем Лилу
+            if LILU_CHAT_ID and LILU_CHAT_ID != YOUR_CHAT_ID:
+                await context.bot.send_message(
+                    chat_id=LILU_CHAT_ID, text=msg,
+                    parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard)
+                )
         except Exception as e:
             await context.bot.send_message(chat_id=YOUR_CHAT_ID, text=f"❌ Ошибка: {str(e)[:200]}")
 
@@ -696,7 +719,14 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     elif data.startswith("redo_"):
-        await query.edit_message_text("✏️ Напиши что исправить:")
+        job_id = data[5:]
+        job = get_job(job_id)
+        context.user_data['redo_job_id'] = job_id
+        context.user_data['redo_result'] = job.get('result','') if job else ''
+        await query.edit_message_text(
+            "✏️ *Напиши что исправить:*\n\nНапример: _сократи_, _переведи на английский_, _добавь ключевые слова_",
+            parse_mode='Markdown'
+        )
 
 async def send_card_result(message, result, marketplace, product, bot):
     if marketplace == "all":
@@ -720,6 +750,40 @@ async def send_card_result(message, result, marketplace, product, bot):
 # ═══ ОБРАБОТЧИК СООБЩЕНИЙ ═══
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+
+    # Обработка правки
+    if context.user_data.get('redo_job_id'):
+        job_id = context.user_data['redo_job_id']
+        original = context.user_data.get('redo_result', '')
+        fix = update.message.text
+        job = get_job(job_id)
+        await update.message.reply_text("⏳ Исправляю...")
+        try:
+            async with httpx.AsyncClient(timeout=60) as client:
+                r = await client.post(
+                    "https://api.groq.com/openai/v1/chat/completions",
+                    headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
+                    json={"model": "llama-3.3-70b-versatile",
+                          "messages": [{"role": "user", "content":
+                              f"Исправь текст карточки товара согласно инструкции.\n\nОРИГИНАЛ:\n{original[:2000]}\n\nИНСТРУКЦИЯ: {fix}\n\nВерни исправленный текст полностью."}],
+                          "max_tokens": 2000}
+                )
+                new_result = r.json()["choices"][0]["message"]["content"].strip()
+            update_job(job_id, 'completed', new_result)
+            context.user_data['redo_result'] = new_result
+            keyboard = [[
+                InlineKeyboardButton("👍 ОК, сдаём!", callback_data=f"done_{job_id}"),
+                InlineKeyboardButton("✏️ Ещё правка", callback_data=f"redo_{job_id}")
+            ]]
+            msg = f"✨ *ИСПРАВЛЕНО!*\n\n━━━━━━━━━━\n{new_result[:2500]}\n━━━━━━━━━━\n\n*Лила, проверь — отправляем?*"
+            await update.message.reply_text(msg, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
+            if LILU_CHAT_ID and LILU_CHAT_ID != YOUR_CHAT_ID:
+                await context.bot.send_message(chat_id=LILU_CHAT_ID, text=msg, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
+            context.user_data.pop('redo_job_id', None)
+            context.user_data.pop('redo_result', None)
+        except Exception as e:
+            await update.message.reply_text(f"❌ Ошибка: {str(e)[:100]}")
+        return
     if user_id not in user_sessions or user_sessions[user_id].get('step') != 'waiting_product':
         keyboard = [[
             InlineKeyboardButton("🟣 WB", callback_data="mp_wb"),
@@ -1073,17 +1137,18 @@ def main():
 
     async def post_init(application):
         asyncio.create_task(periodic_check(application))
-        # Уведомление о запуске
         try:
             await application.bot.send_message(
                 chat_id=YOUR_CHAT_ID,
-                text="🛍️ *КарточникБот запущен!*\n\n"
-                     "Мониторю биржи каждые 15 минут\n"
-                     "Уведомления о сканировании каждые 3 часа\n\n"
-                     "/scan — проверить сейчас\n"
-                     "/price — прайс для клиентов",
+                text="🛍️ *КарточникБот запущен!*\n\nИщу заказы каждые 15 минут\n\n/scan — проверить сейчас\n/price — прайс для клиентов",
                 parse_mode='Markdown'
             )
+            if LILU_CHAT_ID and LILU_CHAT_ID != YOUR_CHAT_ID:
+                await application.bot.send_message(
+                    chat_id=LILU_CHAT_ID,
+                    text="🛍️ *КарточникБот запущен!*\nБуду присылать карточки на проверку.",
+                    parse_mode='Markdown'
+                )
         except:
             pass
     app.post_init = post_init

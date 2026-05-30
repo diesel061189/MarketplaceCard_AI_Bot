@@ -186,16 +186,23 @@ async def parse_card_jobs(client) -> list:
     jobs = []
     for url, source in CARD_RSS_FEEDS:
         try:
-            r = await client.get(url)
+            headers = get_headers()
+            headers['Accept'] = 'application/rss+xml,application/xml,text/xml,*/*'
+            r = await client.get(url, headers=headers, timeout=15)
+            logger.info(f"🛍️ {source}: {r.status_code}")
             if r.status_code != 200:
                 continue
             feed = feedparser.parse(r.text)
-            for e in feed.entries[:8]:
+            if not feed.entries:
+                logger.info(f"{source}: пустой фид")
+                continue
+            logger.info(f"{source}: {len(feed.entries)} записей")
+            for e in feed.entries[:10]:
                 link = e.get('link', '')
                 if not link or is_seen(link):
                     continue
                 title = clean_html(e.get('title', ''))
-                desc = clean_html(e.get('summary', ''))
+                desc = clean_html(e.get('summary', e.get('description', '')))
                 budget_m = re.search(r'[\$₽€]\s?[\d\s,]+|[\d\s,]+\s?(?:руб|USD|\$|₽)', desc + title)
                 budget = budget_m.group(0).strip() if budget_m else "Договорная"
                 if is_card_job(title, desc):
@@ -208,16 +215,18 @@ async def parse_card_jobs(client) -> list:
                         'updated_at': datetime.now().isoformat()
                     })
                 mark_seen(link)
-            logger.info(f"✅ {source}: {len(jobs)} карточных заказов")
         except Exception as e:
             logger.error(f"❌ {source}: {e}")
+    logger.info(f"🛍️ Карточных заказов всего: {len(jobs)}")
     return jobs
 
 async def parse_tg_card_channels(client) -> list:
     jobs = []
     for channel in TG_CARD_CHANNELS:
         try:
-            r = await client.get(f"https://t.me/s/{channel}", headers=HEADERS)
+            headers = get_headers()
+            r = await client.get(f"https://t.me/s/{channel}", headers=headers, timeout=15)
+            logger.info(f"📱 TG @{channel}: {r.status_code}")
             if r.status_code != 200:
                 continue
             posts = re.findall(r'<div class="tgme_widget_message_text[^"]*"[^>]*>(.*?)</div>', r.text, re.DOTALL)
@@ -1069,7 +1078,7 @@ async def send_invoice_usdt(update: Update, context: ContextTypes.DEFAULT_TYPE, 
 async def check_card_jobs(bot) -> int:
     logger.info("🛍️ Ищу заказы на карточки...")
     all_jobs = []
-    async with httpx.AsyncClient(timeout=15, headers=HEADERS, follow_redirects=True) as client:
+    async with httpx.AsyncClient(follow_redirects=True, timeout=15) as client:
         results = await asyncio.gather(
             parse_card_jobs(client),
             parse_tg_card_channels(client),
@@ -1079,13 +1088,13 @@ async def check_card_jobs(bot) -> int:
             if isinstance(r, list):
                 all_jobs.extend(r)
 
-    logger.info(f"📦 Найдено заказов на карточки: {len(all_jobs)}")
-    
+    logger.info(f"📦 Найдено карточных заказов: {len(all_jobs)}")
+
     if not all_jobs:
         return 0
-    
+
     sent = 0
-    for job in all_jobs[:3]:
+    for job in all_jobs[:4]:
         try:
             save_job(job)
             analysis = await analyze_card_job(job)
@@ -1095,7 +1104,6 @@ async def check_card_jobs(bot) -> int:
                 await asyncio.sleep(1.5)
         except Exception as e:
             logger.error(f"Ошибка: {e}")
-    
     return sent
 
 async def periodic_check(app):

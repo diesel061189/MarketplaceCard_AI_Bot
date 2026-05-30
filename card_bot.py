@@ -14,6 +14,8 @@ from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQu
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+# Показываем что не проходит фильтр
+logging.getLogger(__name__).setLevel(logging.INFO)
 
 TELEGRAM_TOKEN = os.getenv("CARD_BOT_TOKEN")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
@@ -193,8 +195,12 @@ def is_card_job(title, desc):
     text = (title + " " + desc).lower()
     for bad in CARD_BLACKLIST:
         if bad in text:
+            logger.debug(f"❌ Чёрный список '{bad}': {title[:50]}")
             return False
-    return any(kw in text for kw in CARD_KEYWORDS)
+    result = any(kw in text for kw in CARD_KEYWORDS)
+    if not result:
+        logger.info(f"⚠️ Не прошёл фильтр: {title[:60]}")
+    return result
 
 # ═══ ПАРСЕРЫ ═══
 async def parse_card_jobs(client) -> list:

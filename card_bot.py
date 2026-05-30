@@ -37,19 +37,14 @@ def get_headers():
 
 # ═══ ИСТОЧНИКИ ЗАКАЗОВ НА КАРТОЧКИ ═══
 CARD_RSS_FEEDS = [
-    # Хабр Фриланс — работает с Railway
-    ("https://freelance.habr.com/tasks.rss?q=карточка+товара", "🟣 Хабр/Карточки"),
-    ("https://freelance.habr.com/tasks.rss?q=wildberries", "🟣 Хабр/WB"),
-    ("https://freelance.habr.com/tasks.rss?q=ozon+описание", "🟣 Хабр/Ozon"),
-    ("https://freelance.habr.com/tasks.rss?q=маркетплейс+текст", "🟣 Хабр/Маркетплейс"),
-    ("https://freelance.habr.com/tasks.rss?q=описание+товара", "🟣 Хабр/Описания"),
-    # We Work Remotely — работает
-    ("https://weworkremotely.com/categories/remote-writing-jobs.rss", "🌍 WWR/Writing"),
+    # FL.ru — работает! 60 записей
+    ("https://www.fl.ru/rss/all.xml", "🇷🇺 FL.ru"),
+    ("https://www.fl.ru/rss/all.xml?category=3", "🇷🇺 FL.ru/Тексты"),
+    ("https://www.fl.ru/rss/all.xml?category=21", "🇷🇺 FL.ru/Переводы"),
     # ProBlogger
     ("https://problogger.com/jobs/feed/", "🌍 ProBlogger"),
-    # FL.ru — пробуем с разными UA
-    ("https://www.fl.ru/rss/all.xml?category=3", "🇷🇺 FL.ru/Тексты"),
-    ("https://www.fl.ru/rss/all.xml", "🇷🇺 FL.ru"),
+    # We Work Remotely
+    ("https://weworkremotely.com/remote-jobs.rss", "🌍 WWR"),
 ]
 
 TG_CARD_CHANNELS = [
@@ -59,24 +54,35 @@ TG_CARD_CHANNELS = [
     "freelance_ru",
 ]
 
-# Ключевые слова для заказов на карточки
+# Ключевые слова — РАСШИРЕННЫЕ
 CARD_KEYWORDS = [
-    # Русские
+    # Маркетплейсы
     "карточка товара", "карточки товаров", "описание товара", "описание продукта",
-    "wildberries", "вайлдберриз", "wb карточка", "ozon карточка", "озон карточка",
-    "яндекс маркет", "маркетплейс", "контент для вб", "контент для озон",
-    "seo описание", "продающее описание", "копирайтинг товар",
+    "wildberries", "вайлдберриз", "wb ", " вб ", "ozon", "озон",
+    "яндекс маркет", "маркетплейс", "маркетплейсов",
+    "rich контент", "инфографика товар",
     "наполнение карточек", "написать карточку", "заполнить карточку",
-    "характеристики товара", "ключевые слова товар", "rich контент",
+    "seo описание", "продающее описание",
+    # Тексты и контент
+    "написать текст", "написать статью", "написать описание",
+    "копирайтинг", "копирайтер", "контент для",
+    "текст для сайта", "тексты для", "наполнение сайта",
+    "продающий текст", "рекламный текст",
+    "статья", "пост для", "посты для",
+    "перевод", "перевести",
+    "редактура", "корректура",
     # Английские
     "product description", "marketplace content", "amazon listing",
-    "product listing", "ecommerce content", "product copywriting",
+    "product listing", "ecommerce", "product copywriting",
     "amazon seo", "etsy listing", "shopify product",
+    "content writing", "copywriting", "article writing",
+    "blog post", "translation", "proofreading",
 ]
 
 CARD_BLACKLIST = [
     "разработка сайта", "программирование", "верстка", "дизайн логотип",
     "видеомонтаж", "анимация", "таргет", "реклама настройка",
+    "мобильное приложение", "android", "ios",
 ]
 
 # ═══ БАЗА ДАННЫХ ═══

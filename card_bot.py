@@ -885,7 +885,14 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
-async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def clear_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Очистить кэш просмотренных заказов"""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('DELETE FROM seen_jobs')
+    conn.commit()
+    conn.close()
+    await update.message.reply_text("🗑️ Кэш очищен! Теперь /scan найдёт все заказы заново.")
     msg = await update.message.reply_text("🔍 Ищу заказы на карточки...")
     count = await check_card_jobs(context.application.bot)
     await msg.edit_text(
@@ -1148,6 +1155,7 @@ def main():
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("stats", stats_command))
     app.add_handler(CommandHandler("scan", scan_command))
+    app.add_handler(CommandHandler("clear", clear_command))
     app.add_handler(CommandHandler("price", price_command))
     app.add_handler(CommandHandler("stars", stars_command))
     app.add_handler(CommandHandler("invoice", invoice_command))

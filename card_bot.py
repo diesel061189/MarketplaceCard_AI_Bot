@@ -611,9 +611,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             emoji = "✅" if sk == style_key else ""
             style_keyboard.append([InlineKeyboardButton(
                 f"{emoji} {sd['name']}",
-                callback_data=f"gen_img_{sk}_{product[:40]}"
+                callback_data=f"gen_img_{sk}_{product[:20]}"
             )])
-        style_keyboard.append([InlineKeyboardButton("🔄 Сгенерировать заново", callback_data=f"regen_img_{style_key}_{product[:40]}")])
+        style_keyboard.append([InlineKeyboardButton("🔄 Сгенерировать заново", callback_data=f"regen_img_{style_key}_{product[:20]}")])
         
         try:
             img_bytes = await generate_product_image(product, style_key)
@@ -630,7 +630,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     chat_id=update.effective_chat.id,
                     text="⚠️ Gemini временно недоступен. Попробуй через минуту.",
                     reply_markup=InlineKeyboardMarkup([[
-                        InlineKeyboardButton("🔄 Попробовать снова", callback_data=f"gen_img_{style_key}_{product[:40]}")
+                        InlineKeyboardButton("🔄 Попробовать снова", callback_data=f"gen_img_{style_key}_{product[:20]}")
                     ]])
                 )
         except Exception as e:
@@ -705,14 +705,14 @@ async def send_card_result(message, result, marketplace, product, bot):
             await bot.send_message(chat_id=message.chat_id, text=text[:4000], parse_mode='Markdown')
             await asyncio.sleep(0.5)
         keyboard = [[
-            InlineKeyboardButton("🔄 Заново", callback_data=f"regen_all_{product[:50]}"),
+            InlineKeyboardButton("🔄 Заново", callback_data=f"regen_all_{product[:20]}"),
             InlineKeyboardButton("🔀 Другой", callback_data="change_mp_")
         ]]
         await bot.send_message(chat_id=message.chat_id, text="✅ *Все карточки готовы!*", parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
     else:
         text = format_card(result, marketplace)
         keyboard = [[
-            InlineKeyboardButton("🔄 Заново", callback_data=f"regen_{marketplace}_{product[:50]}"),
+            InlineKeyboardButton("🔄 Заново", callback_data=f"regen_{marketplace}_{product[:20]}"),
             InlineKeyboardButton("🔀 Другой", callback_data="change_mp_")
         ]]
         await bot.send_message(chat_id=message.chat_id, text=text[:4000], parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
@@ -766,7 +766,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for style_key, style_data in IMAGE_STYLES.items():
             keyboard.append([InlineKeyboardButton(
                 f"{style_data['name']} — {style_data['desc']}",
-                callback_data=f"gen_img_{style_key}_{title[:40]}"
+                callback_data=f"gen_img_{style_key}_{title[:20]}"
             )])
         
         await context.bot.send_message(
@@ -1016,6 +1016,10 @@ async def check_card_jobs(bot) -> int:
                 all_jobs.extend(r)
 
     logger.info(f"📦 Найдено заказов на карточки: {len(all_jobs)}")
+    
+    if not all_jobs:
+        return 0
+    
     sent = 0
     for job in all_jobs[:3]:
         try:
@@ -1027,13 +1031,26 @@ async def check_card_jobs(bot) -> int:
                 await asyncio.sleep(1.5)
         except Exception as e:
             logger.error(f"Ошибка: {e}")
+    
     return sent
 
 async def periodic_check(app):
     await asyncio.sleep(60)
     while True:
         try:
-            await check_card_jobs(app.bot)
+            count = await check_card_jobs(app.bot)
+            if count == 0:
+                # Тихо нашли 0 — просто логируем
+                logger.info("Карточник: новых заказов нет")
+            # Уведомление о сканировании каждые 3 часа
+            now = datetime.now()
+            if now.hour % 3 == 0 and now.minute < 15:
+                await app.bot.send_message(
+                    chat_id=YOUR_CHAT_ID,
+                    text=f"🔍 *Карточник сканирует биржи...*\n"
+                         f"_{now.strftime('%H:%M')} — проверка источников_",
+                    parse_mode='Markdown'
+                )
         except Exception as e:
             logger.error(f"Ошибка: {e}")
         await asyncio.sleep(15 * 60)
@@ -1056,6 +1073,19 @@ def main():
 
     async def post_init(application):
         asyncio.create_task(periodic_check(application))
+        # Уведомление о запуске
+        try:
+            await application.bot.send_message(
+                chat_id=YOUR_CHAT_ID,
+                text="🛍️ *КарточникБот запущен!*\n\n"
+                     "Мониторю биржи каждые 15 минут\n"
+                     "Уведомления о сканировании каждые 3 часа\n\n"
+                     "/scan — проверить сейчас\n"
+                     "/price — прайс для клиентов",
+                parse_mode='Markdown'
+            )
+        except:
+            pass
     app.post_init = post_init
 
     logger.info("🛍️ КарточникБот запущен!")

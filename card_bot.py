@@ -266,8 +266,19 @@ async def generate_single(product: str, marketplace: str, image_base64: str = No
             json={"model": model, "messages": messages, "max_tokens": 1500, "temperature": 0.8}
         )
         text = r.json()["choices"][0]["message"]["content"].strip()
-        if "```" in text:
-            text = text.split("```")[1].split("```")[0].replace("json","").strip()
+        
+        # Улучшенный парсер JSON
+        if "```json" in text:
+            text = text.split("```json")[1].split("```")[0].strip()
+        elif "```" in text:
+            text = text.split("```")[1].split("```")[0].strip()
+        else:
+            # Ищем JSON блок между { и }
+            start = text.find('{')
+            end = text.rfind('}')
+            if start != -1 and end != -1:
+                text = text[start:end+1]
+        
         return json.loads(text)
 
 async def execute_card_job(job: dict) -> str:

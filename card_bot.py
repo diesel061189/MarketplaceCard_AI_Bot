@@ -23,6 +23,8 @@ LILU_CHAT_ID   = int(os.getenv("LILU_CHAT_ID", "0"))
 DB_PATH        = os.getenv("DB_PATH", "/tmp/freelance.db")
 USDT_WALLET    = os.getenv("USDT_WALLET", "TECM5HuPvi9Z6RNzbHZLtesSkKwHBLJEJc")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+LILU_CHAT_ID   = int(os.getenv("LILU_CHAT_ID", str(os.getenv("YOUR_CHAT_ID", "0"))))
+KWORK_URL      = os.getenv("KWORK_URL", "https://kwork.ru/user/artem_sh")
 
 user_sessions = {}
 
@@ -683,25 +685,21 @@ def format_card(data: dict, marketplace: str) -> str:
 
 # ═══ ОТПРАВКА ЗАКАЗА С БИРЖИ ═══
 
+async def send_job_to_lilu(bot, job: dict):
+    """Карточник отправляет заказ Лиле для фильтрации и перевода"""
+    job_with_source = dict(job)
+    job_with_source['source_bot'] = 'Карточник'
+    payload = json.dumps(job_with_source, ensure_ascii=False)
+    msg     = f"🤖JOB:{payload}"
+    try:
+        await bot.send_message(chat_id=LILU_CHAT_ID, text=msg[:4000])
+        logger.info(f"📨 Карточник → Лила: {job.get('title','')[:50]}")
+    except Exception as e:
+        logger.error(f"❌ Ошибка отправки Лиле: {e}")
+
 async def send_job_card(bot, job: dict, analysis: dict):
-    diff_emoji = {"ЛЁГКИЙ": "🟢", "СРЕДНИЙ": "🟡", "СЛОЖНЫЙ": "🔴"}.get(analysis.get('difficulty',''), "⚪")
-    msg = (f"🛍️ *ЗАКАЗ НА КАРТОЧКИ*\n\n{job['source']}\n\n"
-           f"📌 *{job['title'][:100]}*\n\n"
-           f"💰 {job['budget']}\n"
-           f"{diff_emoji} {analysis.get('difficulty','?')} · ⏱ {analysis.get('estimated_time','?')}\n\n"
-           f"💬 _{analysis.get('reason','')}_\n\n"
-           f"📝 *Proposal:*\n{analysis.get('proposal','')[:400]}\n\n"
-           f"🔗 [Открыть заказ]({job['url']})")
-    keyboard = [[
-        InlineKeyboardButton("✅ Берём!", callback_data=f"take_{job['id']}"),
-        InlineKeyboardButton("❌ Пропустить", callback_data=f"skip_{job['id']}")
-    ]]
-    await bot.send_message(
-        chat_id=YOUR_CHAT_ID, text=msg,
-        parse_mode='Markdown',
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        disable_web_page_preview=True
-    )
+    # Оставляем для совместимости — теперь шлём через Лилу
+    await send_job_to_lilu(bot, job)
 
 async def check_card_jobs(bot) -> int:
     count = 0
@@ -710,14 +708,10 @@ async def check_card_jobs(bot) -> int:
         jobs += await parse_tg_card_channels(client)
     for job in jobs:
         save_job(job)
-        try:
-            analysis = await analyze_card_job(job)
-            if analysis.get('can_do', False):
-                await send_job_card(bot, job, analysis)
-                count += 1
-                await asyncio.sleep(1)
-        except Exception as e:
-            logger.error(f"Ошибка анализа: {e}")
+        # Шлём сразу Лиле — она анализирует и фильтрует
+        await send_job_to_lilu(bot, job)
+        count += 1
+        await asyncio.sleep(2)
     return count
 
 # ═══ КНОПКИ ═══
@@ -788,6 +782,87 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await send_card_result(query.message, result, mp, product, context.bot, user_id)
         except Exception as e:
             await query.edit_message_text(f"❌ Ошибка: {str(e)[:100]}")
+
+    # Меню — что умею
+    elif data == "card_skills":
+        await query.edit_message_text(
+            "🛍️ *КАРТОЧНИК — ЧТО УМЕЮ*\n\n"
+            "📦 *Маркетплейсы (RU):*\n"
+            " • Wildberries — карточки, SEO, ключи\n"
+            " • Ozon — карточки, rich-контент\n"
+            " • Яндекс Маркет — карточки, атрибуты\n\n"
+            "🌍 *Маркетплейсы (EN):*\n"
+            " • Amazon — product listings, SEO\n"
+            " • Etsy — listings, descriptions\n"
+            " • eBay — product descriptions\n\n"
+            "🖼 *Инфографика:*\n"
+            " • Студийный / Тёмный / Hype / Natural / Тёплый\n"
+            " • С фото клиента или AI-генерация\n\n"
+            "📤 Заказы с бирж сначала идут через *Лилу* —\n"
+            "она переводит, объясняет, фильтрует!",
+            parse_mode='Markdown',
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("◀️ Назад", callback_data="card_back_main")
+            ]])
+        )
+
+    elif data == "card_kwork":
+        await query.edit_message_text(
+            "🛍️ *НАШИ КВОРКИ НА KWORK*\n\n"
+            "📦 *Карточки WB/Ozon/ЯМ:*\n"
+            " • Эконом (текст): 400₽\n"
+            " • Стандарт (текст + SEO): 1200₽\n"
+            " • Бизнес (текст + SEO + фото): 2000₽\n\n"
+            "🌍 *Amazon/Etsy/eBay:*\n"
+            " • от $8 за listing\n\n"
+            f"🔗 [Все кворки на Kwork]({KWORK_URL})",
+            parse_mode='Markdown',
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🛒 Открыть Kwork", url=KWORK_URL),
+                InlineKeyboardButton("◀️ Назад", callback_data="card_back_main")
+            ]])
+        )
+
+    elif data == "card_price":
+        keyboard = [
+            [InlineKeyboardButton("💎 Оплата USDT",        callback_data="pay_usdt")],
+            [InlineKeyboardButton("⭐ Telegram Stars",      callback_data="pay_stars")],
+            [InlineKeyboardButton("🇷🇺 Рубли (СБП/ЮMoney)", callback_data="pay_rub")],
+            [InlineKeyboardButton("◀️ Назад",              callback_data="card_back_main")],
+        ]
+        await query.edit_message_text(
+            "💰 *ПРАЙС*\n\n"
+            "🟢 Эконом — 1 карточка: $5 / 50⭐ / 400₽\n"
+            "🔵 Стандарт — 5 карточек: $20 / 200⭐\n"
+            "🟣 Бизнес — 10 карточек: $35 / 350⭐\n"
+            "🌍 Amazon/Etsy — от $8 за listing",
+            parse_mode='Markdown',
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+    elif data == "card_stats_btn":
+        stats     = get_stats()
+        by_status = stats['by_status']
+        await query.edit_message_text(
+            f"📊 *СТАТИСТИКА*\n\n"
+            f"🔍 Найдено: {by_status.get('found', 0)}\n"
+            f"✅ Принято: {by_status.get('accepted', 0)}\n"
+            f"✨ Выполнено: {by_status.get('completed', 0)}\n"
+            f"💰 Закрыто: {by_status.get('done', 0)}\n"
+            f"⏭ Пропущено: {by_status.get('skipped', 0)}\n\n"
+            f"💵 Заработано: ${stats['earn_usd']:.2f} / ₽{stats['earn_rub']:.0f}",
+            parse_mode='Markdown',
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("◀️ Назад", callback_data="card_back_main")
+            ]])
+        )
+
+    elif data == "card_back_main":
+        await query.edit_message_text(
+            "🛍️ *КарточникБот* — выбери действие:",
+            parse_mode='Markdown',
+            reply_markup=_card_main_keyboard()
+        )
 
     # Оплата USDT
     elif data == "pay_usdt":
@@ -1117,21 +1192,28 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ═══ КОМАНДЫ ═══
 
+def _card_main_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🟣 WB",   callback_data="mp_wb"),
+         InlineKeyboardButton("🔵 Ozon", callback_data="mp_ozon"),
+         InlineKeyboardButton("🟡 ЯМ",   callback_data="mp_ym"),
+         InlineKeyboardButton("🎯 Все",  callback_data="mp_all")],
+        [InlineKeyboardButton("🧠 Что умею",    callback_data="card_skills"),
+         InlineKeyboardButton("🛍️ Наши кворки", callback_data="card_kwork")],
+        [InlineKeyboardButton("💰 Прайс",       callback_data="card_price"),
+         InlineKeyboardButton("📊 Статистика",   callback_data="card_stats_btn")],
+    ])
+
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [
-        [InlineKeyboardButton("🟣 Wildberries", callback_data="mp_wb"),
-         InlineKeyboardButton("🔵 Ozon",        callback_data="mp_ozon")],
-        [InlineKeyboardButton("🟡 Яндекс Маркет", callback_data="mp_ym"),
-         InlineKeyboardButton("🎯 Все сразу",   callback_data="mp_all")],
-    ]
     await update.message.reply_text(
         "🛍️ *КарточникБот*\n\n"
-        "Генерирую карточки товаров + профессиональную инфографику!\n\n"
+        "Генерирую карточки товаров + инфографику для маркетплейсов!\n\n"
         "📸 *Пришли фото товара* — сделаю карточку как у конкурентов\n"
         "📝 *Или напиши название* — сгенерирую сам\n\n"
-        "Выбери маркетплейс:",
+        "🔍 Ищу заказы → фильтрует *Лила* → только лучшее тебе!\n\n"
+        "Выбери маркетплейс или действие:",
         parse_mode='Markdown',
-        reply_markup=InlineKeyboardMarkup(keyboard)
+        reply_markup=_card_main_keyboard()
     )
 
 async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):

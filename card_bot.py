@@ -652,6 +652,14 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
+async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = await update.message.reply_text("🔍 Ищу заказы на карточки...")
+    count = await check_card_jobs(context.application.bot)
+    await msg.edit_text(
+        f"✅ Найдено заказов: {count}\n"
+        f"{'Заказы летят! 🚀' if count > 0 else 'Пока тихо, ищу дальше ⏳'}"
+    )
+
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     stats = get_stats()
     await update.message.reply_text(

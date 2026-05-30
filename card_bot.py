@@ -239,6 +239,78 @@ MARKETPLACE_PROMPTS = {
 {{"title": "точное название", "description": "описание до 3000 символов", "specs": {{"Параметр": "Значение"}}, "tags": ["тег 1", "тег 2"], "category_tips": "совет"}}""",
 }
 
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+
+# 5 стилей генерации фото
+IMAGE_STYLES = {
+    "studio": {
+        "name": "🤍 Студийный",
+        "desc": "Белый фон, профессиональная съёмка",
+        "prompt": "professional product photo, pure white background, studio lighting, sharp focus, commercial photography, 4k quality",
+        "negative": "text, watermark, people, hands, shadow, dark background, blurry"
+    },
+    "lifestyle": {
+        "name": "🌆 Lifestyle",
+        "desc": "Товар в жизни — высокая кликабельность",
+        "prompt": "lifestyle product photo, beautiful interior background, natural light, cozy atmosphere, instagram style, editorial photography",
+        "negative": "text, watermark, blurry, ugly, deformed"
+    },
+    "hype": {
+        "name": "🔥 Hype",
+        "desc": "Яркий, молодёжный, цепляющий взгляд",
+        "prompt": "hype product photo, vibrant neon background, dynamic lighting, bold colors, streetwear aesthetic, trendy, eye-catching",
+        "negative": "text, watermark, boring, dull, white background"
+    },
+    "natural": {
+        "name": "🌿 Natural",
+        "desc": "Природный фон — для эко-товаров",
+        "prompt": "product photo on natural background, wood texture, green plants, eco friendly aesthetic, soft natural lighting, organic feel",
+        "negative": "text, watermark, artificial, neon, dark"
+    },
+    "closeup": {
+        "name": "📱 Макро",
+        "desc": "Крупный план — детали и текстура",
+        "prompt": "extreme close-up product photo, macro photography, sharp details, texture visible, bokeh background, professional macro lens",
+        "negative": "text, watermark, full body shot, distant, blurry subject"
+    }
+}
+
+async def generate_product_image(product_name: str, style_key: str = "studio") -> bytes:
+    """Генерирует фото товара через Gemini API"""
+    style = IMAGE_STYLES.get(style_key, IMAGE_STYLES["studio"])
+    
+    full_prompt = f"{product_name}, {style['prompt']}"
+    
+    try:
+        async with httpx.AsyncClient(timeout=60) as client:
+            r = await client.post(
+                f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-preview-image-generation:generateContent?key={GEMINI_API_KEY}",
+                headers={"Content-Type": "application/json"},
+                json={
+                    "contents": [{"parts": [{"text": full_prompt}]}],
+                    "generationConfig": {"responseModalities": ["TEXT", "IMAGE"]}
+                }
+            )
+            
+            if r.status_code != 200:
+                logger.error(f"Gemini error: {r.status_code} {r.text[:200]}")
+                return None
+            
+            data = r.json()
+            
+            # Ищем изображение в ответе
+            for part in data.get("candidates", [{}])[0].get("content", {}).get("parts", []):
+                if "inlineData" in part:
+                    img_data = part["inlineData"]["data"]
+                    return base64.b64decode(img_data)
+            
+            logger.error("Gemini: изображение не найдено в ответе")
+            return None
+            
+    except Exception as e:
+        logger.error(f"Ошибка Gemini: {e}")
+        return None
+
 async def generate_card(product: str, marketplace: str, image_base64: str = None) -> dict:
     if marketplace == "all":
         results = {}
@@ -525,7 +597,47 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         title, description = stars_map.get(stars, ("Карточки товаров", "Профессиональные карточки"))
         await send_stars_invoice(update, context, stars, title, description)
 
-    elif data == "change_mp_":
+    elif data.startswith("gen_img_") or data.startswith("regen_img_"):
+        parts = data.split("_", 3)
+        style_key = parts[2] if len(parts) > 2 else "studio"
+        product = parts[3] if len(parts) > 3 else ""
+        style = IMAGE_STYLES.get(style_key, IMAGE_STYLES["studio"])
+        
+        await query.answer(f"🎨 Генерирую в стиле {style['name']}...")
+        
+        # Показываем все стили для переключения
+        style_keyboard = []
+        for sk, sd in IMAGE_STYLES.items():
+            emoji = "✅" if sk == style_key else ""
+            style_keyboard.append([InlineKeyboardButton(
+                f"{emoji} {sd['name']}",
+                callback_data=f"gen_img_{sk}_{product[:40]}"
+            )])
+        style_keyboard.append([InlineKeyboardButton("🔄 Сгенерировать заново", callback_data=f"regen_img_{style_key}_{product[:40]}")])
+        
+        try:
+            img_bytes = await generate_product_image(product, style_key)
+            if img_bytes:
+                await context.bot.send_photo(
+                    chat_id=update.effective_chat.id,
+                    photo=img_bytes,
+                    caption=f"🖼 *{style['name']}*\n_{style['desc']}_\n\n✅ Готово для загрузки на маркетплейс!\n\n💡 Выбери другой стиль:",
+                    parse_mode='Markdown',
+                    reply_markup=InlineKeyboardMarkup(style_keyboard)
+                )
+            else:
+                await context.bot.send_message(
+                    chat_id=update.effective_chat.id,
+                    text="⚠️ Gemini временно недоступен. Попробуй через минуту.",
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton("🔄 Попробовать снова", callback_data=f"gen_img_{style_key}_{product[:40]}")
+                    ]])
+                )
+        except Exception as e:
+            logger.error(f"Ошибка генерации: {e}")
+            await context.bot.send_message(chat_id=update.effective_chat.id, text=f"❌ Ошибка: {str(e)[:100]}")
+
+    elif data.startswith("regen_"):
         keyboard = [
             [InlineKeyboardButton("🟣 WB", callback_data="mp_wb"),
              InlineKeyboardButton("🔵 Ozon", callback_data="mp_ozon")],
@@ -642,6 +754,28 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         result = await generate_card(product, marketplace, image_base64)
         await send_card_result(update.message, result, marketplace, product, context.bot)
+        
+        # Берём название из результата для генерации фото
+        if marketplace == "all":
+            title = list(result.values())[0].get("title", product)
+        else:
+            title = result.get("title", product)
+        
+        # Генерируем фото — сначала спрашиваем стиль
+        keyboard = []
+        for style_key, style_data in IMAGE_STYLES.items():
+            keyboard.append([InlineKeyboardButton(
+                f"{style_data['name']} — {style_data['desc']}",
+                callback_data=f"gen_img_{style_key}_{title[:40]}"
+            )])
+        
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text="🎨 *Выбери стиль фото для маркетплейса:*",
+            parse_mode='Markdown',
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        
         user_sessions[user_id] = {"step": "done"}
     except Exception as e:
         logger.error(f"Ошибка: {e}")

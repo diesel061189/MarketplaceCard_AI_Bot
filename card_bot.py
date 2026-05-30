@@ -870,6 +870,22 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Ошибка. Попробуй ещё раз.\n`{str(e)[:100]}`", parse_mode='Markdown')
 
 # ═══ КОМАНДЫ ═══
+async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = await update.message.reply_text("🔍 Ищу заказы на карточки...")
+    count = await check_card_jobs(context.application.bot)
+    await msg.edit_text(
+        f"✅ Найдено: {count}\n"
+        f"{'Заказы летят! 🚀' if count > 0 else 'Пока 0 — попробуй /clear и снова /scan'}"
+    )
+
+async def clear_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('DELETE FROM seen_jobs')
+    conn.commit()
+    conn.close()
+    await update.message.reply_text("🗑️ Кэш очищен! Теперь /scan найдёт заказы заново.")
+
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("🟣 Wildberries", callback_data="mp_wb"),

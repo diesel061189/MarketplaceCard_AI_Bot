@@ -392,6 +392,128 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(f"❌ Ошибка: {str(e)[:100]}")
 
     # Сменить маркетплейс
+    elif data == "pay_usdt":
+        keyboard = [
+            [InlineKeyboardButton("1 карточка / 1 listing — $5", callback_data="invoice_5")],
+            [InlineKeyboardButton("5 карточек / 5 listings — $20", callback_data="invoice_20")],
+            [InlineKeyboardButton("10 карточек / 10 listings — $35", callback_data="invoice_35")],
+            [InlineKeyboardButton("50 карточек / 50 listings — $150", callback_data="invoice_150")],
+            [InlineKeyboardButton("✏️ Своя сумма / Custom amount", callback_data="invoice_custom")],
+        ]
+        await query.edit_message_text(
+            "💎 *Оплата в USDT*\n\nВыбери пакет:",
+            parse_mode='Markdown',
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+    elif data == "pay_stars":
+        keyboard = [
+            [InlineKeyboardButton("⭐ 50 Stars — 1 карточка", callback_data="stars_50")],
+            [InlineKeyboardButton("⭐ 200 Stars — 5 карточек", callback_data="stars_200")],
+            [InlineKeyboardButton("⭐ 350 Stars — 10 карточек", callback_data="stars_350")],
+            [InlineKeyboardButton("⭐ 1500 Stars — 50 карточек", callback_data="stars_1500")],
+        ]
+        await query.edit_message_text(
+            "⭐ *Telegram Stars*\n\n"
+            "50 ⭐ = 1 карточка\n"
+            "200 ⭐ = 5 карточек\n"
+            "350 ⭐ = 10 карточек\n"
+            "1500 ⭐ = 50 карточек\n\n"
+            "Выбери пакет:",
+            parse_mode='Markdown',
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+    elif data == "pay_rub":
+        await query.edit_message_text(
+            "🇷🇺 *Оплата в рублях*\n\n"
+            "Напиши что тебе нужно и я выставлю счёт:\n\n"
+            "Пример: `/order 5 карточек для WB`\n\n"
+            "Способы оплаты:\n"
+            "• СБП / Перевод по номеру\n"
+            "• ЮMoney\n"
+            "• QIWI",
+            parse_mode='Markdown'
+        )
+
+    elif data.startswith("invoice_"):
+        amount_str = data[8:]
+        if amount_str == "custom":
+            context.user_data['awaiting_custom_amount'] = True
+            await query.edit_message_text(
+                "✏️ Напиши сумму в USD:\n\nПример: `25`",
+                parse_mode='Markdown'
+            )
+        else:
+            amount = float(amount_str)
+            USDT_WALLET = os.getenv("USDT_WALLET", "TECM5HuPvi9Z6RNzbHZLtesSkKwHBLJEJc")
+            descriptions = {
+                5: "1 product listing",
+                20: "5 product listings",
+                35: "10 product listings",
+                150: "50 product listings"
+            }
+            desc = descriptions.get(amount, f"${amount} package")
+            msg = (
+                f"💎 *INVOICE / СЧЁТ*\n\n"
+                f"📋 Service: *{desc}*\n"
+                f"💰 Amount: *${amount:.2f} USDT*\n\n"
+                f"━━━━━━━━━━━━━━━━\n"
+                f"📲 *Payment via Telegram @wallet:*\n\n"
+                f"1️⃣ Open @wallet in Telegram\n"
+                f"2️⃣ Tap Send → Crypto\n"
+                f"3️⃣ Choose USDT TRC20\n"
+                f"4️⃣ Paste address:\n"
+                f"`{USDT_WALLET}`\n"
+                f"5️⃣ Amount: `{amount}` USDT\n\n"
+                f"━━━━━━━━━━━━━━━━\n"
+                f"⚡ After payment tap button below\n"
+                f"🕐 Work starts within 5 minutes"
+            )
+            keyboard = [[
+                InlineKeyboardButton("✅ I paid / Оплатил", callback_data=f"payment_confirm_{amount}"),
+                InlineKeyboardButton("❌ Cancel", callback_data="payment_cancel")
+            ]]
+            await query.edit_message_text(msg, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
+
+    elif data.startswith("payment_confirm_"):
+        amount = float(data[16:])
+        user = update.effective_user
+        username = f"@{user.username}" if user.username else user.first_name
+        
+        # Уведомляем владельца
+        await context.bot.send_message(
+            chat_id=YOUR_CHAT_ID,
+            text=f"💰 *ОПЛАТА ПОЛУЧЕНА!*\n\n"
+                 f"👤 Клиент: {username}\n"
+                 f"💎 Сумма: ${amount:.2f} USDT\n"
+                 f"🕐 {datetime.now().strftime('%d.%m.%Y %H:%M')}\n\n"
+                 f"⚡ Проверь кошелёк и начни работу!",
+            parse_mode='Markdown'
+        )
+        await query.edit_message_text(
+            f"✅ *Thank you! / Спасибо!*\n\n"
+            f"Payment of ${amount:.2f} USDT confirmed.\n"
+            f"Work starts within 5 minutes!\n\n"
+            f"Оплата ${amount:.2f} USDT подтверждена.\n"
+            f"Начинаем работу в течение 5 минут!\n\n"
+            f"📱 Send your product info / Отправь данные товара",
+            parse_mode='Markdown'
+        )
+        # Сбрасываем сессию для приёма товара
+        user_sessions[user.id] = {"step": "waiting_product", "marketplace": "all", "paid": True}
+
+    elif data.startswith("stars_"):
+        stars = int(data[6:])
+        stars_map = {
+            50: ("1 карточка товара", "Профессиональная карточка для WB, Ozon, Amazon или другого маркетплейса"),
+            200: ("5 карточек товаров", "5 профессиональных карточек для любых маркетплейсов"),
+            350: ("10 карточек товаров", "10 профессиональных карточек — скидка 30%"),
+            1500: ("50 карточек товаров", "50 профессиональных карточек — максимальная скидка 40%"),
+        }
+        title, description = stars_map.get(stars, ("Карточки товаров", "Профессиональные карточки"))
+        await send_stars_invoice(update, context, stars, title, description)
+
     elif data == "change_mp_":
         keyboard = [
             [InlineKeyboardButton("🟣 WB", callback_data="mp_wb"),
@@ -541,26 +663,190 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode='Markdown'
     )
 
-async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def stars_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Оплата звёздами Telegram"""
+    keyboard = [
+        [InlineKeyboardButton("⭐ 50 Stars — 1 карточка", callback_data="stars_50")],
+        [InlineKeyboardButton("⭐ 200 Stars — 5 карточек", callback_data="stars_200")],
+        [InlineKeyboardButton("⭐ 350 Stars — 10 карточек", callback_data="stars_350")],
+        [InlineKeyboardButton("⭐ 1500 Stars — 50 карточек", callback_data="stars_1500")],
+    ]
+    await update.message.reply_text(
+        "⭐ *Оплата Telegram Stars*\n\n"
+        "Быстро и безопасно прямо в Telegram!\n\n"
+        "50 ⭐ = 1 карточка товара\n"
+        "200 ⭐ = 5 карточек (-20%)\n"
+        "350 ⭐ = 10 карточек (-30%)\n"
+        "1500 ⭐ = 50 карточек (-40%)\n\n"
+        "Выбери пакет:",
+        parse_mode='Markdown',
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+async def send_stars_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE, stars: int, title: str, description: str):
+    """Отправляет счёт на оплату звёздами"""
+    await context.bot.send_invoice(
+        chat_id=update.effective_chat.id,
+        title=title,
+        description=description,
+        payload=f"card_{stars}_{update.effective_user.id}",
+        currency="XTR",  # Telegram Stars
+        prices=[{"label": title, "amount": stars}],
+    )
+
+async def pre_checkout_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Подтверждаем платёж"""
+    query = update.pre_checkout_query
+    await query.answer(ok=True)
+
+async def successful_payment_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обрабатываем успешный платёж звёздами"""
+    payment = update.message.successful_payment
+    stars = payment.total_amount
+    user = update.effective_user
+    username = f"@{user.username}" if user.username else user.first_name
+    
+    # Считаем количество карточек
+    cards_map = {50: 1, 200: 5, 350: 10, 1500: 50}
+    cards_count = cards_map.get(stars, 1)
+    
+    # Уведомляем владельца
+    await context.bot.send_message(
+        chat_id=YOUR_CHAT_ID,
+        text=f"⭐ *ОПЛАТА ЗВЁЗДАМИ!*\n\n"
+             f"👤 Клиент: {username}\n"
+             f"⭐ Stars: {stars}\n"
+             f"📦 Карточек: {cards_count}\n"
+             f"🕐 {datetime.now().strftime('%d.%m.%Y %H:%M')}",
+        parse_mode='Markdown'
+    )
+    
+    # Отвечаем клиенту
+    await update.message.reply_text(
+        f"✅ *Спасибо! Оплата получена!*\n\n"
+        f"⭐ {stars} Stars\n"
+        f"📦 Карточек: {cards_count}\n\n"
+        f"Отправь фото или описание товара — начинаем! 🚀",
+        parse_mode='Markdown'
+    )
+    
+    # Готовим сессию
+    user_sessions[user.id] = {
+        "step": "waiting_product",
+        "marketplace": "all",
+        "paid": True,
+        "cards_left": cards_count
+    }
+
+async def invoice_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Быстро выставить счёт клиенту"""
+    args = context.args
+    if args:
+        try:
+            amount = float(args[0])
+            desc = " ".join(args[1:]) if len(args) > 1 else "Product listing service"
+            USDT_WALLET = os.getenv("USDT_WALLET", "TECM5HuPvi9Z6RNzbHZLtesSkKwHBLJEJc")
+            msg = (
+                f"💎 *INVOICE*\n\n"
+                f"📋 {desc}\n"
+                f"💰 *${amount:.2f} USDT*\n\n"
+                f"📲 Send to @wallet:\n"
+                f"`{USDT_WALLET}`\n"
+                f"Network: TRC20\n\n"
+                f"After payment: /start"
+            )
+            await update.message.reply_text(msg, parse_mode='Markdown')
+        except:
+            await update.message.reply_text("❌ Формат: `/invoice 25 5 карточек WB`", parse_mode='Markdown')
+    else:
+        await update.message.reply_text(
+            "💎 *Выставить счёт*\n\n"
+            "Формат: `/invoice [сумма] [описание]`\n\n"
+            "Примеры:\n"
+            "`/invoice 5 1 Amazon listing`\n"
+            "`/invoice 20 5 карточек WB`\n"
+            "`/invoice 35 10 Ozon listings`",
+            parse_mode='Markdown'
+        )
+
+async def order_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Принять заказ от клиента"""
+    args = context.args
+    order_text = " ".join(args) if args else "не указан"
+    user = update.effective_user
+    username = f"@{user.username}" if user.username else user.first_name
+    
+    # Уведомляем владельца
+    await context.bot.send_message(
+        chat_id=YOUR_CHAT_ID,
+        text=f"📦 *НОВЫЙ ЗАКАЗ!*\n\n"
+             f"👤 Клиент: {username}\n"
+             f"📋 Заказ: {order_text}\n"
+             f"🕐 {datetime.now().strftime('%d.%m.%Y %H:%M')}\n\n"
+             f"Ответь клиенту и выстави счёт через /invoice",
+        parse_mode='Markdown'
+    )
+    await update.message.reply_text(
+        f"✅ Заказ принят!\n\n"
+        f"📋 {order_text}\n\n"
+        f"Мы свяжемся с вами в течение 5 минут.\n"
+        f"We'll contact you within 5 minutes. 🚀",
+    )
     msg = await update.message.reply_text("🔍 Ищу заказы на карточки...")
     count = await check_card_jobs(context.application.bot)
     await msg.edit_text(f"✅ Найдено заказов: {count}\n{'Заказы летят! 🚀' if count > 0 else 'Пока тихо, ищу дальше ⏳'}")
 
 async def price_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [
+        [InlineKeyboardButton("🇷🇺 Оплатить в рублях", callback_data="pay_rub")],
+        [InlineKeyboardButton("💎 Pay in USDT (Telegram Wallet)", callback_data="pay_usdt")],
+        [InlineKeyboardButton("⭐ Оплатить Stars", callback_data="pay_stars")],
+    ]
     await update.message.reply_text(
         "💰 *ПРАЙС-ЛИСТ*\n\n"
-        "🟣 Wildberries — от 150 руб/карточка\n"
-        "🔵 Ozon — от 200 руб/карточка\n"
-        "🟡 Яндекс Маркет — от 150 руб/карточка\n"
-        "🎯 Все 3 — от 400 руб\n\n"
-        "📦 *Пакеты:*\n"
+        "🇷🇺 *Российские маркетплейсы:*\n"
+        "🟣 Wildberries — от 150 ₽/карточка\n"
+        "🔵 Ozon — от 200 ₽/карточка\n"
+        "🟡 Яндекс Маркет — от 150 ₽/карточка\n"
+        "🎯 Все 3 сразу — от 400 ₽\n\n"
+        "🌍 *International marketplaces:*\n"
+        "🟠 Amazon — from $5/listing\n"
+        "🔴 eBay — from $3/listing\n"
+        "🟢 Etsy — from $5/listing\n"
+        "🛍️ Shopify — from $5/listing\n"
+        "🎯 All platforms — from $15\n\n"
+        "📦 *Пакеты / Packages:*\n"
         "• 10 карточек — скидка 10%\n"
         "• 50 карточек — скидка 20%\n"
         "• 100+ карточек — скидка 30%\n\n"
         "✅ 1 карточка = 2 минуты\n"
-        "✅ Оплата после получения",
-        parse_mode='Markdown'
+        "✅ Оплата: рубли или USDT",
+        parse_mode='Markdown',
+        reply_markup=InlineKeyboardMarkup(keyboard)
     )
+
+async def send_invoice_usdt(update: Update, context: ContextTypes.DEFAULT_TYPE, amount_usd: float, description: str):
+    """Отправляет счёт на оплату в USDT через Telegram Wallet"""
+    USDT_WALLET = os.getenv("USDT_WALLET", "TECM5HuPvi9Z6RNzbHZLtesSkKwHBLJEJc")
+    
+    msg = (
+        f"💎 *Invoice / Счёт на оплату*\n\n"
+        f"📋 {description}\n"
+        f"💰 Amount: *${amount_usd:.2f} USDT*\n\n"
+        f"📲 *Как оплатить:*\n"
+        f"1. Открой @wallet в Telegram\n"
+        f"2. Нажми Отправить / Send\n"
+        f"3. Вставь адрес:\n"
+        f"`{USDT_WALLET}`\n"
+        f"4. Сумма: `{amount_usd}` USDT\n"
+        f"5. Сеть: *TRC20 (Tron)*\n\n"
+        f"⚡ После оплаты нажми кнопку ниже"
+    )
+    keyboard = [[
+        InlineKeyboardButton("✅ Оплатил / Paid", callback_data=f"payment_confirm_{amount_usd}"),
+        InlineKeyboardButton("❌ Отмена", callback_data="payment_cancel")
+    ]]
+    await update.message.reply_text(msg, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
 
 # ═══ ГЛАВНЫЙ ПАРСЕР ═══
 async def check_card_jobs(bot) -> int:
@@ -606,8 +892,14 @@ def main():
     app.add_handler(CommandHandler("stats", stats_command))
     app.add_handler(CommandHandler("scan", scan_command))
     app.add_handler(CommandHandler("price", price_command))
+    app.add_handler(CommandHandler("stars", stars_command))
+    app.add_handler(CommandHandler("invoice", invoice_command))
+    app.add_handler(CommandHandler("order", order_command))
     app.add_handler(CallbackQueryHandler(button_handler))
+    app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment_handler))
     app.add_handler(MessageHandler(filters.TEXT | filters.PHOTO, handle_message))
+    from telegram.ext import PreCheckoutQueryHandler
+    app.add_handler(PreCheckoutQueryHandler(pre_checkout_handler))
 
     async def post_init(application):
         asyncio.create_task(periodic_check(application))

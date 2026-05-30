@@ -322,39 +322,111 @@ IMAGE_STYLES = {
 }
 
 async def generate_product_image(product_name: str, style_key: str = "studio") -> bytes:
-    """Генерирует фото товара через Gemini API"""
+    """Генерирует фото товара через Gemini, при ошибке — через Pillow"""
     style = IMAGE_STYLES.get(style_key, IMAGE_STYLES["studio"])
-    
     full_prompt = f"{product_name}, {style['prompt']}"
     
+    # Пробуем Gemini
+    if GEMINI_API_KEY:
+        for model in [
+            "gemini-2.0-flash-exp",
+            "gemini-2.0-flash-preview-image-generation",
+            "gemini-1.5-flash",
+        ]:
+            try:
+                async with httpx.AsyncClient(timeout=60) as client:
+                    r = await client.post(
+                        f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={GEMINI_API_KEY}",
+                        headers={"Content-Type": "application/json"},
+                        json={
+                            "contents": [{"parts": [{"text": full_prompt}]}],
+                            "generationConfig": {"responseModalities": ["TEXT", "IMAGE"]}
+                        }
+                    )
+                    if r.status_code == 200:
+                        data = r.json()
+                        for part in data.get("candidates", [{}])[0].get("content", {}).get("parts", []):
+                            if "inlineData" in part:
+                                logger.info(f"✅ Gemini {model} сработал!")
+                                return base64.b64decode(part["inlineData"]["data"])
+                    logger.error(f"Gemini {model}: {r.status_code}")
+            except Exception as e:
+                logger.error(f"Gemini {model}: {e}")
+    
+    # Резерв — Pillow инфографика
+    logger.info("🎨 Gemini недоступен — генерирую через Pillow")
+    return generate_pillow_card(product_name, style_key)
+
+def generate_pillow_card(product_name: str, style_key: str = "studio") -> bytes:
+    """Генерирует красивую инфографику через Pillow"""
     try:
-        async with httpx.AsyncClient(timeout=60) as client:
-            r = await client.post(
-                f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-preview-image-generation:generateContent?key={GEMINI_API_KEY}",
-                headers={"Content-Type": "application/json"},
-                json={
-                    "contents": [{"parts": [{"text": full_prompt}]}],
-                    "generationConfig": {"responseModalities": ["TEXT", "IMAGE"]}
-                }
-            )
-            
-            if r.status_code != 200:
-                logger.error(f"Gemini error: {r.status_code} {r.text[:200]}")
-                return None
-            
-            data = r.json()
-            
-            # Ищем изображение в ответе
-            for part in data.get("candidates", [{}])[0].get("content", {}).get("parts", []):
-                if "inlineData" in part:
-                    img_data = part["inlineData"]["data"]
-                    return base64.b64decode(img_data)
-            
-            logger.error("Gemini: изображение не найдено в ответе")
-            return None
-            
+        from PIL import Image, ImageDraw, ImageFont
+        import io
+
+        # Цвета по стилю
+        styles_colors = {
+            "studio": ("#FFFFFF", "#1a1a2e", "#4361ee"),
+            "hype": ("#0d0d0d", "#ff006e", "#8338ec"),
+            "lifestyle": ("#f8f4f0", "#2d3436", "#e17055"),
+            "natural": ("#f0f7ee", "#2d6a4f", "#40916c"),
+            "closeup": ("#1a1a2e", "#ffffff", "#4cc9f0"),
+        }
+        bg_color, text_color, accent = styles_colors.get(style_key, styles_colors["studio"])
+
+        img = Image.new('RGB', (700, 700), color=bg_color)
+        draw = ImageDraw.Draw(img)
+
+        # Фон с градиентом
+        for i in range(700):
+            alpha = int(255 * (1 - i/700) * 0.3)
+            r = int(accent[1:3], 16)
+            g = int(accent[3:5], 16)
+            b = int(accent[5:7], 16)
+            draw.line([(0, i), (700, i)], fill=(r, g, b, alpha) if bg_color == "#FFFFFF" else (r//3, g//3, b//3))
+
+        # Акцентный блок сверху
+        acc_r = int(accent[1:3], 16)
+        acc_g = int(accent[3:5], 16)
+        acc_b = int(accent[5:7], 16)
+        draw.rectangle([0, 0, 700, 8], fill=(acc_r, acc_g, acc_b))
+
+        # Большой круг в центре — место для товара
+        draw.ellipse([175, 150, 525, 500], fill=(acc_r, acc_g, acc_b, 20) if bg_color == "#FFFFFF" else (acc_r//4, acc_g//4, acc_b//4))
+        draw.ellipse([175, 150, 525, 500], outline=(acc_r, acc_g, acc_b), width=2)
+
+        # Иконка товара в центре
+        draw.text((350, 320), "📦", anchor="mm", fill=text_color, font=None)
+
+        # Название товара
+        words = product_name.split()
+        lines = []
+        line = ""
+        for word in words:
+            if len(line + word) < 28:
+                line += word + " "
+            else:
+                lines.append(line.strip())
+                line = word + " "
+        if line:
+            lines.append(line.strip())
+
+        y = 530
+        for line in lines[:3]:
+            draw.text((350, y), line, anchor="mm", fill=text_color)
+            y += 30
+
+        # Нижний блок с фичами
+        draw.rectangle([0, 620, 700, 700], fill=(acc_r, acc_g, acc_b))
+        draw.text((350, 660), "✅ SEO  •  ✅ Ключевые слова  •  ✅ Rich-контент", anchor="mm", fill="white")
+
+        # Сохраняем
+        buf = io.BytesIO()
+        img.save(buf, format='PNG', quality=95)
+        buf.seek(0)
+        return buf.read()
+
     except Exception as e:
-        logger.error(f"Ошибка Gemini: {e}")
+        logger.error(f"Pillow ошибка: {e}")
         return None
 
 async def generate_card(product: str, marketplace: str, image_base64: str = None) -> dict:

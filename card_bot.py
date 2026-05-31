@@ -23,6 +23,7 @@ GROQ_API_KEY      = os.getenv("GROQ_API_KEY")        # только для го�
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")   # для всего текстового
 YOUR_CHAT_ID      = int(os.getenv("YOUR_CHAT_ID", "0"))
 LILU_CHAT_ID      = int(os.getenv("LILU_CHAT_ID", str(os.getenv("YOUR_CHAT_ID", "0"))))
+LILU_BOT_TOKEN    = os.getenv("LILU_BOT_TOKEN", "")
 DB_PATH           = os.getenv("DB_PATH", "/tmp/freelance.db")
 USDT_WALLET       = os.getenv("USDT_WALLET", "TECM5HuPvi9Z6RNzbHZLtesSkKwHBLJEJc")
 GEMINI_API_KEY    = os.getenv("GEMINI_API_KEY", "")
@@ -608,16 +609,34 @@ async def redo_card_job(original: str, fix_instruction: str) -> str:
 # ═══ ОТПРАВКА ЛИЛЕ ═══
 
 async def send_job_to_lilu(bot, job: dict):
-    """Карточник → Лила для фильтрации и анализа"""
+    """Шлёт заказ через токен бота Лилы — так Лила видит и обрабатывает его"""
     job_payload = dict(job)
     job_payload['source_bot'] = 'Карточник'
     payload = json.dumps(job_payload, ensure_ascii=False)
     msg = f"🤖JOB:{payload}"
+
+    # Способ 1: через токен Лилы (правильный — Лила обработает сама)
+    if LILU_BOT_TOKEN:
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                r = await client.post(
+                    f"https://api.telegram.org/bot{LILU_BOT_TOKEN}/sendMessage",
+                    json={"chat_id": YOUR_CHAT_ID, "text": msg[:4000]}
+                )
+                if r.status_code == 200:
+                    logger.info(f"📨 Карточник → Лила (её токен): {job.get('title','')[:50]}")
+                    return
+                else:
+                    logger.error(f"❌ Токен Лилы ошибка {r.status_code}: {r.text[:100]}")
+        except Exception as e:
+            logger.error(f"❌ Ошибка токена Лилы: {e}")
+
+    # Способ 2: fallback — своим ботом напрямую тебе
     try:
-        await bot.send_message(chat_id=LILU_CHAT_ID, text=msg[:4000])
-        logger.info(f"📨 Карточник → Лила: {job.get('title','')[:50]}")
+        await bot.send_message(chat_id=YOUR_CHAT_ID, text=msg[:4000])
+        logger.info(f"📨 Карточник → тебе (fallback): {job.get('title','')[:50]}")
     except Exception as e:
-        logger.error(f"❌ Ошибка отправки Лиле: {e}")
+        logger.error(f"❌ Fallback ошибка: {e}")
 
 async def check_card_jobs(bot) -> int:
     count = 0

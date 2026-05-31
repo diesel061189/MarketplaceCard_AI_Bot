@@ -9,6 +9,7 @@ import tempfile
 import feedparser
 import re
 import io
+import random
 from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
@@ -16,19 +17,24 @@ from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQu
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-TELEGRAM_TOKEN = os.getenv("CARD_BOT_TOKEN")
-GROQ_API_KEY   = os.getenv("GROQ_API_KEY")
-YOUR_CHAT_ID   = int(os.getenv("YOUR_CHAT_ID", "0"))
-LILU_CHAT_ID   = int(os.getenv("LILU_CHAT_ID", "0"))
-DB_PATH        = os.getenv("DB_PATH", "/tmp/freelance.db")
-USDT_WALLET    = os.getenv("USDT_WALLET", "TECM5HuPvi9Z6RNzbHZLtesSkKwHBLJEJc")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-LILU_CHAT_ID   = int(os.getenv("LILU_CHAT_ID", str(os.getenv("YOUR_CHAT_ID", "0"))))
-KWORK_URL      = os.getenv("KWORK_URL", "https://kwork.ru/user/artem_sh")
+# ═══ ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ ═══
+TELEGRAM_TOKEN    = os.getenv("CARD_BOT_TOKEN")
+GROQ_API_KEY      = os.getenv("GROQ_API_KEY")        # только для голоса если понадобится
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")   # для всего текстового
+YOUR_CHAT_ID      = int(os.getenv("YOUR_CHAT_ID", "0"))
+LILU_CHAT_ID      = int(os.getenv("LILU_CHAT_ID", str(os.getenv("YOUR_CHAT_ID", "0"))))
+DB_PATH           = os.getenv("DB_PATH", "/tmp/freelance.db")
+USDT_WALLET       = os.getenv("USDT_WALLET", "TECM5HuPvi9Z6RNzbHZLtesSkKwHBLJEJc")
+GEMINI_API_KEY    = os.getenv("GEMINI_API_KEY", "")
+KWORK_URL         = os.getenv("KWORK_URL", "https://kwork.ru/user/artem_sh")
+
+# ═══ ANTHROPIC МОДЕЛИ ═══
+ANTHROPIC_HAIKU  = "claude-haiku-4-5-20251001"   # генерация карточек — дёшево
+ANTHROPIC_SONNET = "claude-sonnet-4-6"            # анализ сложных заказов
+ANTHROPIC_URL    = "https://api.anthropic.com/v1/messages"
 
 user_sessions = {}
 
-import random
 HEADERS_LIST = [
     {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/122.0.0.0 Safari/537.36", "Accept-Language": "ru-RU,ru;q=0.9"},
     {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Safari/605.1.15", "Accept-Language": "en-US,en;q=0.9"},
@@ -36,6 +42,56 @@ HEADERS_LIST = [
 
 def get_headers():
     return random.choice(HEADERS_LIST)
+
+# ═══ ANTHROPIC ХЕЛПЕР ═══
+
+async def anthropic_request(
+    messages: list,
+    system: str = "",
+    model: str = None,
+    max_tokens: int = 1500,
+    image_b64: str = None,
+    image_media: str = "image/jpeg"
+) -> str:
+    if model is None:
+        model = ANTHROPIC_HAIKU
+
+    headers = {
+        "x-api-key": ANTHROPIC_API_KEY,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json"
+    }
+
+    # Если есть картинка — вставляем в последнее сообщение
+    if image_b64 and messages:
+        last = messages[-1]
+        if isinstance(last.get("content"), str):
+            messages[-1] = {
+                "role": last["role"],
+                "content": [
+                    {"type": "image", "source": {
+                        "type": "base64",
+                        "media_type": image_media,
+                        "data": image_b64
+                    }},
+                    {"type": "text", "text": last["content"]}
+                ]
+            }
+
+    payload = {
+        "model": model,
+        "max_tokens": max_tokens,
+        "messages": messages
+    }
+    if system:
+        payload["system"] = system
+
+    async with httpx.AsyncClient(timeout=45) as client:
+        r = await client.post(ANTHROPIC_URL, headers=headers, json=payload)
+        data = r.json()
+        if "content" not in data:
+            raise Exception(f"Anthropic error: {data}")
+        return data["content"][0]["text"]
 
 # ═══ СТИЛИ КАРТОЧЕК ═══
 
@@ -123,16 +179,12 @@ CARD_BLACKLIST = [
     "разработка сайта", "программирование", "верстка", "дизайн логотип",
     "видеомонтаж", "анимация", "таргет", "реклама настройка",
     "мобильное приложение", "android", "ios",
-    "допечатная", "раскладка элементов", "фотозона", "широкоформатная печать",
+    "допечатная", "фотозона", "широкоформатная печать",
     "indesign", "illustrator", "photoshop макет",
-    "чертёж", "чертеж", "чертежник", "конструктор", "autocad",
-    "solidworks", "компас", "проектирование",
+    "чертёж", "чертеж", "чертежник", "autocad", "solidworks",
     "написать работу", "курсовая", "дипломная", "реферат",
-    "контрольная работа", "решить задачи по",
-    "купить и отправить", "купить в городе", "забрать и привезти",
-    "доставить", "курьер", "съездить", "поехать",
+    "купить и отправить", "купить в городе", "доставить", "курьер",
     "отправить посылку", "пвз", "cdek", "сдэк",
-    "купить книги", "купить товар", "найти и купить",
 ]
 
 # ═══ БАЗА ДАННЫХ ═══
@@ -305,41 +357,40 @@ async def parse_tg_card_channels(client) -> list:
             logger.error(f"❌ TG {channel}: {e}")
     return jobs
 
-# ═══ AI ПРОМПТЫ ═══
+# ═══ ПРОМПТЫ МАРКЕТПЛЕЙСОВ ═══
 
 MARKETPLACE_PROMPTS = {
-    "wb": """Создай продающую карточку для Wildberries. Верни ТОЛЬКО JSON:
-{"title": "заголовок до 100 символов", "description": "описание 500-1000 символов", "characteristics": ["характеристика 1", "характеристика 2", "характеристика 3", "характеристика 4"], "keywords": "ключевые слова через запятую", "seo_tips": "совет по SEO", "badges": ["значок 1", "значок 2", "значок 3"]}""",
-    "ozon": """Создай карточку для Ozon. Верни ТОЛЬКО JSON:
-{"title": "название до 200 символов", "description": "описание 1000-3000 символов", "rich_content": [{"heading": "Заголовок", "text": "Текст"}], "attributes": ["атрибут 1", "атрибут 2", "атрибут 3"], "keywords": "ключевые слова", "badges": ["значок 1", "значок 2", "значок 3"]}""",
-    "ym": """Создай карточку для Яндекс Маркет. Верни ТОЛЬКО JSON:
-{"title": "точное название", "description": "описание до 3000 символов", "specs": {"Параметр1": "Значение1", "Параметр2": "Значение2"}, "tags": ["тег 1", "тег 2"], "category_tips": "совет", "badges": ["значок 1", "значок 2", "значок 3"]}""",
+    "wb": """Создай продающую карточку для Wildberries. Верни ТОЛЬКО JSON без пояснений:
+{"title": "заголовок до 100 символов с ключевыми словами", "description": "продающее описание 500-800 символов", "characteristics": ["характеристика 1", "характеристика 2", "характеристика 3", "характеристика 4", "характеристика 5"], "keywords": "ключевые слова через запятую 10-15 штук", "seo_tips": "краткий SEO совет", "badges": ["✅ Быстрая доставка", "⭐ Топ продаж", "🎁 Гарантия качества"]}""",
+
+    "ozon": """Создай карточку для Ozon. Верни ТОЛЬКО JSON без пояснений:
+{"title": "название до 200 символов", "description": "подробное описание 1000-2000 символов с буллетами", "rich_content": [{"heading": "Преимущества", "text": "текст"}], "attributes": ["атрибут 1", "атрибут 2", "атрибут 3", "атрибут 4", "атрибут 5"], "keywords": "ключевые слова", "badges": ["✅ Оригинал", "🚀 Быстро", "💎 Качество"]}""",
+
+    "ym": """Создай карточку для Яндекс Маркет. Верни ТОЛЬКО JSON без пояснений:
+{"title": "точное полное название товара", "description": "описание до 2000 символов", "specs": {"Материал": "значение", "Размер": "значение", "Цвет": "значение", "Вес": "значение"}, "tags": ["тег 1", "тег 2", "тег 3"], "category_tips": "совет по категории", "badges": ["✅ Сертифицировано", "🏆 Бестселлер", "🎯 Выгодно"]}""",
+
+    "amazon": """Create an Amazon product listing. Return ONLY JSON without explanation:
+{"title": "SEO title max 200 chars with main keywords", "bullet_points": ["benefit 1 with keyword", "benefit 2 with keyword", "benefit 3 with keyword", "benefit 4 with keyword", "benefit 5 with keyword"], "description": "detailed description 2000 chars", "keywords": "backend search terms", "badges": ["✅ Prime Ready", "⭐ Top Rated", "🎁 Gift Ready"]}""",
+
+    "etsy": """Create an Etsy listing. Return ONLY JSON without explanation:
+{"title": "handmade-focused title with keywords max 140 chars", "description": "story-driven description 2000 chars", "tags": ["tag1", "tag2", "tag3", "tag4", "tag5", "tag6", "tag7", "tag8", "tag9", "tag10", "tag11", "tag12", "tag13"], "materials": ["material1", "material2"], "badges": ["🤝 Handmade", "💚 Eco-friendly", "⭐ Custom Orders"]}""",
 }
 
-# ═══ GEMINI — ГЕНЕРАЦИЯ ФОТО ТОВАРА (когда нет фото) ═══
+# ═══ GEMINI ГЕНЕРАЦИЯ ФОТО ═══
 
 async def generate_product_image_gemini(product_name: str, style_key: str = "studio") -> bytes | None:
-    """Генерирует фото товара через Gemini (только если у клиента нет фото)"""
     style = IMAGE_STYLES.get(style_key, IMAGE_STYLES["studio"])
-
     prompt = (
         f"Create a professional product photo for marketplace listing. "
-        f"Product: {product_name}. "
-        f"Style: clean commercial photography, {style['desc'].lower()}. "
-        f"Show only the product, no people, no hands, no text overlay, no watermarks. "
-        f"High quality, sharp focus, ready for e-commerce."
+        f"Product: {product_name}. Style: clean commercial photography, {style['desc'].lower()}. "
+        f"Show only the product, no people, no hands, no text overlay. High quality e-commerce photo."
     )
-
     GEMINI_MODELS = [
         "gemini-2.5-flash-preview-05-20",
         "gemini-2.0-flash-preview-image-generation",
-        "gemini-2.5-flash",
     ]
-
     if not GEMINI_API_KEY:
-        logger.warning("GEMINI_API_KEY не задан")
         return None
-
     for model in GEMINI_MODELS:
         try:
             async with httpx.AsyncClient(timeout=90) as client:
@@ -351,312 +402,237 @@ async def generate_product_image_gemini(product_name: str, style_key: str = "stu
                         "generationConfig": {"responseModalities": ["TEXT", "IMAGE"]}
                     }
                 )
-                logger.info(f"Gemini [{model}]: {r.status_code}")
                 if r.status_code == 200:
                     data = r.json()
-                    candidates = data.get("candidates", [])
-                    if candidates:
-                        for part in candidates[0].get("content", {}).get("parts", []):
-                            if "inlineData" in part:
-                                img_data = part["inlineData"].get("data", "")
-                                if img_data:
-                                    logger.info(f"✅ Gemini [{model}] — фото товара готово!")
-                                    return base64.b64decode(img_data)
-                    logger.warning(f"Gemini [{model}] — нет картинки в ответе: {str(data)[:200]}")
-                else:
-                    logger.error(f"Gemini [{model}] ошибка {r.status_code}: {r.text[:200]}")
+                    for part in data.get("candidates", [{}])[0].get("content", {}).get("parts", []):
+                        if "inlineData" in part:
+                            img_data = part["inlineData"].get("data", "")
+                            if img_data:
+                                logger.info(f"✅ Gemini [{model}] — фото готово!")
+                                return base64.b64decode(img_data)
         except Exception as e:
-            logger.error(f"Gemini [{model}] исключение: {e}")
-
+            logger.error(f"Gemini [{model}]: {e}")
     return None
 
-# ═══ PILLOW — ПРОФЕССИОНАЛЬНАЯ ИНФОГРАФИКА ═══
+# ═══ PILLOW ИНФОГРАФИКА ═══
 
-def build_infographic(
-    product_name: str,
-    card_data: dict,
-    marketplace: str,
-    style_key: str = "studio",
-    product_photo_bytes: bytes = None
-) -> bytes:
-    """
-    Строит профессиональную инфографику:
-    - Если есть product_photo_bytes — вставляет реальное фото товара
-    - Если нет — делает красивый placeholder
-    """
-    from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageEnhance
+def build_infographic(product_name, card_data, marketplace, style_key="studio", product_photo_bytes=None) -> bytes:
+    from PIL import Image, ImageDraw, ImageFont
     import textwrap
 
     style = IMAGE_STYLES.get(style_key, IMAGE_STYLES["studio"])
     W, H = 900, 1200
-
-    # ─── ФОНОВЫЙ СЛОЙ ───
-    img = Image.new('RGB', (W, H), color=style['bg'])
+    img  = Image.new('RGB', (W, H), color=style['bg'])
     draw = ImageDraw.Draw(img)
 
-    bg      = style['bg']
-    accent  = style['accent']
-    txt_col = style['text']
-    badge_bg   = style['badge_bg']
-    badge_txt  = style['badge_text']
+    bg       = style['bg']
+    accent   = style['accent']
+    txt_col  = style['text']
+    badge_bg  = style['badge_bg']
+    badge_txt = style['badge_text']
 
-    # Декоративный градиентный блок сверху
+    # Градиент сверху
     for y in range(180):
         alpha = int(255 * (1 - y / 180))
-        r = min(accent[0] + 40, 255)
-        g = min(accent[1] + 40, 255)
-        b = min(accent[2] + 40, 255)
-        blended = (
-            int(r * alpha/255 + bg[0] * (1 - alpha/255)),
-            int(g * alpha/255 + bg[1] * (1 - alpha/255)),
-            int(b * alpha/255 + bg[2] * (1 - alpha/255)),
+        blended = tuple(
+            int(min(accent[i]+40,255) * alpha/255 + bg[i] * (1-alpha/255))
+            for i in range(3)
         )
         draw.line([(0, y), (W, y)], fill=blended)
 
-    # Цветная полоса сверху
     draw.rectangle([0, 0, W, 8], fill=accent)
 
-    # ─── МАРКЕТПЛЕЙС БЕЙДЖ ───
-    mp_labels = {"wb": "WILDBERRIES", "ozon": "OZON", "ym": "ЯНДЕКС МАРКЕТ"}
-    mp_colors = {
-        "wb": (147, 0, 211),
-        "ozon": (0, 91, 255),
-        "ym": (255, 204, 0),
-    }
-    mp_color = mp_colors.get(marketplace, accent)
-    mp_txt_color = (255, 255, 255) if marketplace != "ym" else (20, 20, 20)
-    draw.rectangle([20, 18, 220, 52], fill=mp_color, outline=mp_color)
-    draw.text((120, 35), mp_labels.get(marketplace, "МАРКЕТПЛЕЙС"),
-              anchor="mm", fill=mp_txt_color)
+    # Маркетплейс бейдж
+    mp_labels = {"wb": "WILDBERRIES", "ozon": "OZON", "ym": "ЯНДЕКС МАРКЕТ", "amazon": "AMAZON", "etsy": "ETSY"}
+    mp_colors = {"wb": (147,0,211), "ozon": (0,91,255), "ym": (255,204,0), "amazon": (255,153,0), "etsy": (235,94,40)}
+    mp_color   = mp_colors.get(marketplace, accent)
+    mp_txt_col = (255,255,255) if marketplace not in ("ym",) else (20,20,20)
+    draw.rectangle([20, 18, 230, 52], fill=mp_color)
+    draw.text((125, 35), mp_labels.get(marketplace, "МАРКЕТПЛЕЙС"), anchor="mm", fill=mp_txt_col)
 
-    # ─── НАЗВАНИЕ ТОВАРА ───
+    # Название
     title = card_data.get("title", product_name)
-    title_lines = textwrap.wrap(title, width=28)[:3]
-    y_title = 70
-    for line in title_lines:
-        draw.text((W // 2, y_title), line, anchor="mm", fill=txt_col)
-        y_title += 38
+    for i, line in enumerate(textwrap.wrap(title, width=28)[:3]):
+        draw.text((W//2, 70 + i*38), line, anchor="mm", fill=txt_col)
 
-    # ─── ЗОНА ФОТО ТОВАРА ───
-    photo_y0, photo_y1 = 185, 620
-    photo_x0, photo_x1 = 60, W - 60
-
+    # Зона фото
+    px0, py0, px1, py1 = 60, 185, W-60, 620
     if product_photo_bytes:
         try:
             prod_img = Image.open(io.BytesIO(product_photo_bytes)).convert("RGBA")
-            # Вписываем в зону сохраняя пропорции
-            prod_img.thumbnail((photo_x1 - photo_x0, photo_y1 - photo_y0), Image.LANCZOS)
-            # Центрируем
-            px = photo_x0 + (photo_x1 - photo_x0 - prod_img.width) // 2
-            py = photo_y0 + (photo_y1 - photo_y0 - prod_img.height) // 2
-            # Белый фон под фото
-            draw.rectangle([photo_x0, photo_y0, photo_x1, photo_y1],
-                           fill=(255, 255, 255) if style_key == "studio" else tuple(min(c+30, 255) for c in bg))
-            # Тонкая рамка
-            draw.rectangle([photo_x0, photo_y0, photo_x1, photo_y1],
-                           outline=accent, width=2)
-            img.paste(prod_img, (px, py), prod_img if prod_img.mode == 'RGBA' else None)
-            logger.info("✅ Фото товара вставлено в карточку")
+            prod_img.thumbnail((px1-px0, py1-py0), Image.LANCZOS)
+            px = px0 + (px1-px0-prod_img.width)//2
+            py = py0 + (py1-py0-prod_img.height)//2
+            draw.rectangle([px0, py0, px1, py1], fill=(255,255,255) if style_key=="studio" else tuple(min(c+30,255) for c in bg))
+            draw.rectangle([px0, py0, px1, py1], outline=accent, width=2)
+            img.paste(prod_img, (px, py), prod_img if prod_img.mode=='RGBA' else None)
         except Exception as e:
-            logger.error(f"Ошибка вставки фото: {e}")
-            _draw_photo_placeholder(draw, photo_x0, photo_y0, photo_x1, photo_y1, accent, bg, product_name)
+            logger.error(f"Фото вставка: {e}")
+            _placeholder(draw, px0, py0, px1, py1, accent, bg, product_name)
     else:
-        _draw_photo_placeholder(draw, photo_x0, photo_y0, photo_x1, photo_y1, accent, bg, product_name)
+        _placeholder(draw, px0, py0, px1, py1, accent, bg, product_name)
 
-    # ─── БЕЙДЖИ (ДО/ПОСЛЕ, ГАРАНТИЯ, и т.д.) ───
-    badges = card_data.get("badges", ["✅ Быстрая доставка", "⭐ Топ продаж", "🎁 Гарантия"])
-    badge_y = photo_y1 + 15
-    bw = (W - 60) // len(badges[:3])
+    # Бейджи
+    badges = card_data.get("badges", ["✅ Доставка", "⭐ Топ продаж", "🎁 Гарантия"])
+    by = py1 + 15
+    bw = (W-60) // len(badges[:3])
     for i, badge in enumerate(badges[:3]):
-        bx0 = 30 + i * bw
-        bx1 = bx0 + bw - 10
-        draw.rectangle([bx0, badge_y, bx1, badge_y + 36], fill=badge_bg)
-        # Скругление имитируем дополнительными прямоугольниками
-        draw.text(((bx0 + bx1) // 2, badge_y + 18), str(badge)[:22],
-                  anchor="mm", fill=badge_txt)
+        bx0, bx1 = 30 + i*bw, 30 + i*bw + bw - 10
+        draw.rectangle([bx0, by, bx1, by+36], fill=badge_bg)
+        draw.text(((bx0+bx1)//2, by+18), str(badge)[:22], anchor="mm", fill=badge_txt)
 
-    # ─── ХАРАКТЕРИСТИКИ ───
-    chars_y = badge_y + 55
-    draw.rectangle([30, chars_y - 5, W - 30, chars_y + 2], fill=accent)
-
+    # Характеристики
+    cy = by + 55
+    draw.rectangle([30, cy-5, W-30, cy+2], fill=accent)
+    cy += 15
     chars = []
     if marketplace == "wb":
         chars = card_data.get("characteristics", [])
     elif marketplace == "ozon":
         chars = card_data.get("attributes", [])
     elif marketplace == "ym":
-        specs = card_data.get("specs", {})
-        chars = [f"{k}: {v}" for k, v in specs.items()]
+        chars = [f"{k}: {v}" for k, v in card_data.get("specs", {}).items()]
+    elif marketplace == "amazon":
+        chars = card_data.get("bullet_points", [])
+    elif marketplace == "etsy":
+        chars = [f"Материал: {m}" for m in card_data.get("materials", [])] + card_data.get("tags", [])[:4]
 
-    chars_y += 15
     for i, char in enumerate(chars[:6]):
-        # Чередующийся фон строк
-        row_bg = tuple(max(c - 10, 0) if i % 2 == 0 else c for c in bg)
-        draw.rectangle([30, chars_y - 4, W - 30, chars_y + 28], fill=row_bg)
-        # Маркер
-        draw.rectangle([30, chars_y + 4, 36, chars_y + 20], fill=accent)
-        draw.text((50, chars_y + 12), str(char)[:55], anchor="lm", fill=txt_col)
-        chars_y += 38
+        row_bg = tuple(max(c-10,0) if i%2==0 else c for c in bg)
+        draw.rectangle([30, cy-4, W-30, cy+28], fill=row_bg)
+        draw.rectangle([30, cy+4, 36, cy+20], fill=accent)
+        draw.text((50, cy+12), str(char)[:55], anchor="lm", fill=txt_col)
+        cy += 38
 
-    # ─── КЛЮЧЕВЫЕ СЛОВА / SEO ───
-    kw_y = max(chars_y + 15, 920)
-    kw = card_data.get("keywords", "")
+    # Ключевые слова
+    kw_y = max(cy+15, 920)
+    kw = card_data.get("keywords", "") or ", ".join(card_data.get("tags", [])[:5])
     if kw:
-        draw.rectangle([30, kw_y, W - 30, kw_y + 35], fill=tuple(max(c-20,0) for c in bg))
-        kw_short = str(kw)[:80]
-        draw.text((W // 2, kw_y + 17), f"🔍 {kw_short}", anchor="mm", fill=accent)
+        draw.rectangle([30, kw_y, W-30, kw_y+35], fill=tuple(max(c-20,0) for c in bg))
+        draw.text((W//2, kw_y+17), f"🔍 {str(kw)[:80]}", anchor="mm", fill=accent)
 
-    # ─── НИЖНЯЯ ПАНЕЛЬ ───
-    draw.rectangle([0, H - 110, W, H], fill=accent)
+    # Нижняя панель
+    draw.rectangle([0, H-110, W, H], fill=accent)
+    desc = card_data.get("description", "")[:120].replace("\n", " ")
+    for i, line in enumerate(textwrap.wrap(desc, width=60)[:2]):
+        draw.text((W//2, H-90+i*28), line, anchor="mm", fill=(255,255,255))
+    draw.text((W//2, H-25), "✅ SEO-оптимизировано  •  ✅ Готово для загрузки", anchor="mm", fill=(220,255,220))
 
-    # Описание (первые 120 символов)
-    desc = card_data.get("description", "")
-    desc_short = desc[:120].replace("\n", " ")
-    desc_wrapped = textwrap.wrap(desc_short, width=60)[:2]
-    for i, line in enumerate(desc_wrapped):
-        draw.text((W // 2, H - 90 + i * 28), line, anchor="mm", fill=(255, 255, 255))
-
-    draw.text((W // 2, H - 25), "✅ SEO-оптимизировано  •  ✅ Готово для загрузки",
-              anchor="mm", fill=(220, 255, 220))
-
-    # Сохраняем
     buf = io.BytesIO()
     img.save(buf, format='PNG', quality=95)
     buf.seek(0)
     return buf.read()
 
-
-def _draw_photo_placeholder(draw, x0, y0, x1, y1, accent, bg, product_name):
-    """Заглушка когда нет фото товара"""
-    ph_bg = tuple(min(c + 25, 255) for c in bg)
+def _placeholder(draw, x0, y0, x1, y1, accent, bg, name):
+    ph_bg = tuple(min(c+25,255) for c in bg)
     draw.rectangle([x0, y0, x1, y1], fill=ph_bg)
     draw.rectangle([x0, y0, x1, y1], outline=accent, width=2)
-    cx, cy = (x0 + x1) // 2, (y0 + y1) // 2
-    # Большая иконка
-    draw.text((cx, cy - 40), "📦", anchor="mm", fill=accent)
-    draw.text((cx, cy + 20), product_name[:30], anchor="mm", fill=accent)
-    draw.text((cx, cy + 55), "Отправь фото товара для", anchor="mm", fill=tuple(max(c-60,0) for c in accent))
-    draw.text((cx, cy + 80), "профессиональной карточки", anchor="mm", fill=tuple(max(c-60,0) for c in accent))
+    cx, cy = (x0+x1)//2, (y0+y1)//2
+    draw.text((cx, cy-40), "📦", anchor="mm", fill=accent)
+    draw.text((cx, cy+20), name[:30], anchor="mm", fill=accent)
+    draw.text((cx, cy+55), "Отправь фото товара", anchor="mm", fill=tuple(max(c-60,0) for c in accent))
 
-# ═══ ГЛАВНАЯ ФУНКЦИЯ ГЕНЕРАЦИИ ИЗОБРАЖЕНИЯ ═══
-
-async def generate_product_image(
-    product_name: str,
-    card_data: dict,
-    marketplace: str,
-    style_key: str = "studio",
-    photo_bytes: bytes = None
-) -> bytes:
-    """
-    Если есть photo_bytes (клиент прислал фото) — строим инфографику на его основе.
-    Если нет — просим Gemini сгенерировать фото товара, потом строим инфографику.
-    """
+async def generate_product_image(product_name, card_data, marketplace, style_key="studio", photo_bytes=None) -> bytes:
     if photo_bytes:
-        logger.info("🖼 Строим инфографику на основе фото клиента")
         return build_infographic(product_name, card_data, marketplace, style_key, photo_bytes)
-
-    # Нет фото — пробуем Gemini
-    logger.info("🤖 Фото нет — генерируем через Gemini")
     gemini_photo = await generate_product_image_gemini(product_name, style_key)
+    return build_infographic(product_name, card_data, marketplace, style_key, gemini_photo)
 
-    if gemini_photo:
-        logger.info("✅ Gemini дал фото — строим инфографику")
-        return build_infographic(product_name, card_data, marketplace, style_key, gemini_photo)
+# ═══ ГЕНЕРАЦИЯ КАРТОЧКИ — ANTHROPIC ═══
 
-    # Gemini тоже не дал — делаем без фото (placeholder)
-    logger.info("⚠️ Без фото — placeholder инфографика")
-    return build_infographic(product_name, card_data, marketplace, style_key, None)
-
-# ═══ ГЕНЕРАЦИЯ ТЕКСТА КАРТОЧКИ ═══
-
-MARKETPLACE_PROMPTS = {
-    "wb": """Создай продающую карточку для Wildberries. Верни ТОЛЬКО JSON:
-{"title": "заголовок до 100 символов", "description": "описание 500-1000 символов", "characteristics": ["характеристика 1", "характеристика 2", "характеристика 3", "характеристика 4", "характеристика 5"], "keywords": "ключевые слова через запятую", "seo_tips": "совет по SEO", "badges": ["значок 1", "значок 2", "значок 3"]}""",
-    "ozon": """Создай карточку для Ozon. Верни ТОЛЬКО JSON:
-{"title": "название до 200 символов", "description": "описание 1000-3000 символов", "rich_content": [{"heading": "Заголовок", "text": "Текст"}], "attributes": ["атрибут 1", "атрибут 2", "атрибут 3", "атрибут 4", "атрибут 5"], "keywords": "ключевые слова", "badges": ["значок 1", "значок 2", "значок 3"]}""",
-    "ym": """Создай карточку для Яндекс Маркет. Верни ТОЛЬКО JSON:
-{"title": "точное название", "description": "описание до 3000 символов", "specs": {"Параметр1": "Значение1", "Параметр2": "Значение2", "Параметр3": "Значение3"}, "tags": ["тег 1", "тег 2", "тег 3"], "category_tips": "совет", "badges": ["значок 1", "значок 2", "значок 3"]}""",
-}
-
-async def generate_card(product: str, marketplace: str, image_base64: str = None) -> dict:
-    if marketplace == "all":
-        results = {}
-        for mp in ["wb", "ozon", "ym"]:
-            results[mp] = await generate_single(product, mp, image_base64)
-        return results
-    return await generate_single(product, marketplace, image_base64)
-
-async def generate_single(product: str, marketplace: str, image_base64: str = None) -> dict:
+async def generate_single(product: str, marketplace: str, image_b64: str = None) -> dict:
+    """Генерирует карточку через Anthropic Haiku — дёшево и качественно"""
     prompt = f"ТОВАР: {product}\n\n{MARKETPLACE_PROMPTS[marketplace]}"
-    if image_base64:
-        messages = [{"role": "user", "content": [
-            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}},
-            {"type": "text", "text": f"Это фото товара.\n\n{MARKETPLACE_PROMPTS[marketplace]}"}
-        ]}]
-        model = "meta-llama/llama-4-scout-17b-16e-instruct"
-    else:
-        messages = [{"role": "user", "content": prompt}]
-        model = "llama-3.3-70b-versatile"
 
-    async with httpx.AsyncClient(timeout=40) as client:
-        r = await client.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
-            json={"model": model, "messages": messages, "max_tokens": 1500, "temperature": 0.8}
-        )
-        text = r.json()["choices"][0]["message"]["content"].strip()
+    text = await anthropic_request(
+        messages=[{"role": "user", "content": prompt}],
+        model=ANTHROPIC_HAIKU,
+        max_tokens=1500,
+        image_b64=image_b64
+    )
 
+    # Чистим JSON
     if "```json" in text:
         text = text.split("```json")[1].split("```")[0].strip()
     elif "```" in text:
         text = text.split("```")[1].split("```")[0].strip()
     else:
-        start = text.find('{')
-        end = text.rfind('}')
+        start, end = text.find('{'), text.rfind('}')
         if start != -1 and end != -1:
             text = text[start:end+1]
     return json.loads(text)
 
+async def generate_card(product: str, marketplace: str, image_b64: str = None) -> dict:
+    if marketplace == "all":
+        results = {}
+        for mp in ["wb", "ozon", "ym"]:
+            results[mp] = await generate_single(product, mp, image_b64)
+            await asyncio.sleep(0.5)
+        return results
+    return await generate_single(product, marketplace, image_b64)
+
 async def execute_card_job(job: dict) -> str:
+    """Выполняет заказ с биржи — Anthropic Haiku"""
     prompt = f"""Выполни заказ на написание карточек товаров профессионально.
+
 ЗАКАЗ: {job['title']}
 ОПИСАНИЕ: {job['description'][:800]}
-Создай карточку товара для Wildberries и Ozon:
-- Продающий заголовок
-- SEO описание с ключевыми словами
-- Характеристики
-- Ключевые слова для поиска
-Отвечай на русском языке."""
-    async with httpx.AsyncClient(timeout=60) as client:
-        r = await client.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
-            json={"model": "llama-3.3-70b-versatile",
-                  "messages": [{"role": "user", "content": prompt}],
-                  "max_tokens": 2000}
-        )
-        return r.json()["choices"][0]["message"]["content"].strip()
 
-async def analyze_card_job(job: dict) -> dict:
-    prompt = f"""Оцени заказ на написание карточек товаров. Ответь ТОЛЬКО JSON:
-ЗАКАЗ: {job['title']}
-ОПИСАНИЕ: {job['description'][:400]}
-БЮДЖЕТ: {job['budget']}
-{{"can_do": true, "difficulty": "ЛЁГКИЙ", "reason": "одно предложение", "proposal": "proposal на языке заказа 3 предложения", "estimated_time": "1 час"}}"""
-    async with httpx.AsyncClient(timeout=25) as client:
-        r = await client.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
-            json={"model": "llama-3.3-70b-versatile",
-                  "messages": [{"role": "user", "content": prompt}],
-                  "max_tokens": 400}
-        )
-        text = r.json()["choices"][0]["message"]["content"].strip()
-        if "```" in text:
-            text = text.split("```")[1].split("```")[0].replace("json","").strip()
-        return json.loads(text)
+Создай готовую карточку товара:
+1. Продающий заголовок с ключевыми словами
+2. SEO описание 500-800 символов
+3. Список характеристик (5-7 пунктов)
+4. Ключевые слова для поиска (10-15 штук)
+5. Совет по оптимизации
 
-# ═══ ФОРМАТИРОВАНИЕ ТЕКСТА КАРТОЧКИ ═══
+Отвечай на языке заказа. Будь конкретным и профессиональным."""
+
+    return await anthropic_request(
+        messages=[{"role": "user", "content": prompt}],
+        model=ANTHROPIC_HAIKU,
+        max_tokens=2000
+    )
+
+async def redo_card_job(original: str, fix_instruction: str) -> str:
+    """Правка карточки — Anthropic Haiku"""
+    return await anthropic_request(
+        messages=[{"role": "user", "content":
+            f"Исправь карточку товара согласно инструкции.\n\n"
+            f"ОРИГИНАЛ:\n{original[:2000]}\n\n"
+            f"ИНСТРУКЦИЯ: {fix_instruction}\n\n"
+            f"Верни полный исправленный текст."}],
+        model=ANTHROPIC_HAIKU,
+        max_tokens=2000
+    )
+
+# ═══ ОТПРАВКА ЛИЛЕ ═══
+
+async def send_job_to_lilu(bot, job: dict):
+    """Карточник → Лила для фильтрации и анализа"""
+    job_payload = dict(job)
+    job_payload['source_bot'] = 'Карточник'
+    payload = json.dumps(job_payload, ensure_ascii=False)
+    msg = f"🤖JOB:{payload}"
+    try:
+        await bot.send_message(chat_id=LILU_CHAT_ID, text=msg[:4000])
+        logger.info(f"📨 Карточник → Лила: {job.get('title','')[:50]}")
+    except Exception as e:
+        logger.error(f"❌ Ошибка отправки Лиле: {e}")
+
+async def check_card_jobs(bot) -> int:
+    count = 0
+    async with httpx.AsyncClient() as client:
+        jobs = await parse_card_jobs(client)
+        jobs += await parse_tg_card_channels(client)
+    for job in jobs:
+        save_job(job)
+        await send_job_to_lilu(bot, job)
+        count += 1
+        await asyncio.sleep(2)
+    logger.info(f"📋 Карточник нашёл и отправил Лиле: {count} заказов")
+    return count
+
+# ═══ ФОРМАТИРОВАНИЕ КАРТОЧКИ ═══
 
 def format_card(data: dict, marketplace: str) -> str:
     if marketplace == "wb":
@@ -668,112 +644,154 @@ def format_card(data: dict, marketplace: str) -> str:
                 f"💡 _{data.get('seo_tips','')}_")
     elif marketplace == "ozon":
         attrs = "\n".join([f" • {a}" for a in data.get('attributes', [])])
-        rich = ""
-        for s in data.get('rich_content', []):
-            rich += f"\n*{s.get('heading','')}*\n{s.get('text','')}\n"
+        rich  = "".join([f"\n*{s.get('heading','')}*\n{s.get('text','')}\n" for s in data.get('rich_content', [])])
         return (f"🔵 *OZON*\n\n📌 *Название:*\n`{data.get('title','')}`\n\n"
                 f"📝 *Описание:*\n{data.get('description','')}\n\n"
                 f"🎨 *Rich-контент:*{rich}\n📋 *Атрибуты:*\n{attrs}\n\n"
                 f"🔍 `{data.get('keywords','')}`")
-    else:
+    elif marketplace == "ym":
         specs = "\n".join([f" • {k}: {v}" for k, v in data.get('specs', {}).items()])
         tags  = ", ".join(data.get('tags', []))
         return (f"🟡 *ЯНДЕКС МАРКЕТ*\n\n📌 *Название:*\n`{data.get('title','')}`\n\n"
                 f"📝 *Описание:*\n{data.get('description','')}\n\n"
                 f"⚙️ *Характеристики:*\n{specs}\n\n"
                 f"🏷️ `{tags}`\n\n💡 _{data.get('category_tips','')}_")
+    elif marketplace == "amazon":
+        bullets = "\n".join([f" • {b}" for b in data.get('bullet_points', [])])
+        return (f"🟠 *AMAZON*\n\n📌 *Title:*\n`{data.get('title','')}`\n\n"
+                f"📝 *Description:*\n{data.get('description','')}\n\n"
+                f"✅ *Bullet Points:*\n{bullets}\n\n"
+                f"🔍 *Backend Keywords:*\n`{data.get('keywords','')}`")
+    elif marketplace == "etsy":
+        tags = ", ".join(data.get('tags', []))
+        mats = ", ".join(data.get('materials', []))
+        return (f"🟢 *ETSY*\n\n📌 *Title:*\n`{data.get('title','')}`\n\n"
+                f"📝 *Description:*\n{data.get('description','')}\n\n"
+                f"🏷️ *Tags:* `{tags}`\n\n🔧 *Materials:* {mats}")
+    return str(data)
 
-# ═══ ОТПРАВКА ЗАКАЗА С БИРЖИ ═══
+# ═══ STARS INVOICE ═══
 
-async def send_job_to_lilu(bot, job: dict):
-    """Карточник отправляет заказ Лиле для фильтрации и перевода"""
-    job_with_source = dict(job)
-    job_with_source['source_bot'] = 'Карточник'
-    payload = json.dumps(job_with_source, ensure_ascii=False)
-    msg     = f"🤖JOB:{payload}"
+async def send_stars_invoice(update, context, stars, title, description):
     try:
-        await bot.send_message(chat_id=LILU_CHAT_ID, text=msg[:4000])
-        logger.info(f"📨 Карточник → Лила: {job.get('title','')[:50]}")
+        await context.bot.send_invoice(
+            chat_id=update.effective_chat.id,
+            title=title, description=description,
+            payload=f"card_order_{stars}_{update.effective_user.id}",
+            currency="XTR",
+            prices=[{"label": title, "amount": stars}],
+            provider_token=""
+        )
     except Exception as e:
-        logger.error(f"❌ Ошибка отправки Лиле: {e}")
+        logger.error(f"Stars invoice: {e}")
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=f"⭐ Оплата {stars} Stars — напиши нам и выставим счёт вручную."
+        )
 
-async def send_job_card(bot, job: dict, analysis: dict):
-    # Оставляем для совместимости — теперь шлём через Лилу
-    await send_job_to_lilu(bot, job)
+# ═══ ОТПРАВКА РЕЗУЛЬТАТА ═══
 
-async def check_card_jobs(bot) -> int:
-    count = 0
-    async with httpx.AsyncClient() as client:
-        jobs = await parse_card_jobs(client)
-        jobs += await parse_tg_card_channels(client)
-    for job in jobs:
-        save_job(job)
-        # Шлём сразу Лиле — она анализирует и фильтрует
-        await send_job_to_lilu(bot, job)
-        count += 1
-        await asyncio.sleep(2)
-    return count
+async def send_card_result(message, result, marketplace, product, bot, user_id=None):
+    if marketplace == "all":
+        for mp, data in result.items():
+            await bot.send_message(chat_id=message.chat_id, text=format_card(data, mp)[:4000], parse_mode='Markdown')
+            await asyncio.sleep(0.5)
+        mp0, data0 = list(result.keys())[0], list(result.values())[0]
+        photo_b = user_sessions.get(user_id, {}).get("last_photo_bytes") if user_id else None
+        img_bytes = await generate_product_image(product, data0, mp0, "studio", photo_b)
+        await bot.send_photo(
+            chat_id=message.chat_id, photo=img_bytes,
+            caption="🖼 *Инфографика готова!*\n\n💡 Выбери стиль:",
+            parse_mode='Markdown',
+            reply_markup=InlineKeyboardMarkup(_style_keyboard("studio", product[:15]))
+        )
+    else:
+        await bot.send_message(chat_id=message.chat_id, text=format_card(result, marketplace)[:4000], parse_mode='Markdown')
+        photo_b = user_sessions.get(user_id, {}).get("last_photo_bytes") if user_id else None
+        img_bytes = await generate_product_image(product, result, marketplace, "studio", photo_b)
+        await bot.send_photo(
+            chat_id=message.chat_id, photo=img_bytes,
+            caption=(f"🖼 *Студийный стиль*\n\n"
+                     f"✅ {'На основе вашего фото!' if photo_b else 'Инфографика готова!'}\n\n"
+                     f"💡 Выбери другой стиль:"),
+            parse_mode='Markdown',
+            reply_markup=InlineKeyboardMarkup(_style_keyboard("studio", product[:15]))
+        )
+
+def _style_keyboard(current_style, product_short):
+    rows = []
+    for sk, sd in IMAGE_STYLES.items():
+        emoji = "✅ " if sk == current_style else ""
+        rows.append([InlineKeyboardButton(
+            f"{emoji}{sd['name']} — {sd['desc']}",
+            callback_data=f"style_{sk}_{product_short}"
+        )])
+    return rows
+
+def _card_main_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🟣 WB",      callback_data="mp_wb"),
+         InlineKeyboardButton("🔵 Ozon",   callback_data="mp_ozon"),
+         InlineKeyboardButton("🟡 ЯМ",     callback_data="mp_ym")],
+        [InlineKeyboardButton("🟠 Amazon", callback_data="mp_amazon"),
+         InlineKeyboardButton("🟢 Etsy",   callback_data="mp_etsy"),
+         InlineKeyboardButton("🎯 Все RU", callback_data="mp_all")],
+        [InlineKeyboardButton("🧠 Что умею",    callback_data="card_skills"),
+         InlineKeyboardButton("🛍️ Наши кворки", callback_data="card_kwork")],
+        [InlineKeyboardButton("💰 Прайс",       callback_data="card_price"),
+         InlineKeyboardButton("📊 Статистика",   callback_data="card_stats_btn")],
+    ])
 
 # ═══ КНОПКИ ═══
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
+    query   = update.callback_query
     await query.answer()
-    data  = query.data
+    data    = query.data
     user_id = update.effective_user.id
 
     # Выбор маркетплейса
     if data.startswith("mp_"):
         marketplace = data[3:]
         user_sessions[user_id] = {"marketplace": marketplace, "step": "waiting_product"}
-        names = {"wb": "🟣 Wildberries", "ozon": "🔵 Ozon", "ym": "🟡 Яндекс Маркет", "all": "🎯 Все"}
+        names = {"wb":"🟣 Wildberries","ozon":"🔵 Ozon","ym":"🟡 Яндекс Маркет",
+                 "amazon":"🟠 Amazon","etsy":"🟢 Etsy","all":"🎯 Все RU"}
         await query.edit_message_text(
             f"*{names.get(marketplace,'?')}* выбран!\n\n"
-            f"📸 Отправь *фото товара* (лучше) или просто *название*\n\n"
-            f"_Если пришлёшь фото — инфографика будет с реальным снимком товара_",
+            f"📸 Отправь *фото товара* (лучше) или *название*\n\n"
+            f"_Фото товара → инфографика с реальным снимком_",
             parse_mode='Markdown'
         )
 
-    # Смена стиля / регенерация инфографики
+    # Смена стиля инфографики
     elif data.startswith("style_") or data.startswith("restyle_"):
-        parts = data.split("_", 2)
+        parts     = data.split("_", 2)
         style_key = parts[1]
-        session_key = parts[2] if len(parts) > 2 else ""
-
-        session = user_sessions.get(user_id, {})
-        product   = session.get("last_product", session_key)
+        session   = user_sessions.get(user_id, {})
+        product   = session.get("last_product", "товар")
         mp        = session.get("last_marketplace", "wb")
         card_data = session.get("last_card_data", {})
         photo_b   = session.get("last_photo_bytes")
-
-        await query.answer(f"🎨 Применяю стиль {IMAGE_STYLES.get(style_key,{}).get('name','...')}...")
-
         try:
-            await query.edit_message_text("⏳ Перегенерирую в новом стиле...")
-        except Exception:
+            await query.edit_message_text("⏳ Применяю стиль...")
+        except:
             pass
-
         try:
             img_bytes = await generate_product_image(product, card_data, mp, style_key, photo_b)
-            style_keyboard = _style_keyboard(style_key, product[:15])
             await context.bot.send_photo(
-                chat_id=update.effective_chat.id,
-                photo=img_bytes,
-                caption=(
-                    f"🖼 *{IMAGE_STYLES[style_key]['name']}*\n"
-                    f"_{IMAGE_STYLES[style_key]['desc']}_\n\n"
-                    f"✅ Готово для загрузки!\n\n💡 Выбери другой стиль:"
-                ),
+                chat_id=update.effective_chat.id, photo=img_bytes,
+                caption=(f"🖼 *{IMAGE_STYLES[style_key]['name']}*\n"
+                         f"_{IMAGE_STYLES[style_key]['desc']}_\n\n"
+                         f"✅ Готово!\n\n💡 Другой стиль:"),
                 parse_mode='Markdown',
-                reply_markup=InlineKeyboardMarkup(style_keyboard)
+                reply_markup=InlineKeyboardMarkup(_style_keyboard(style_key, product[:15]))
             )
         except Exception as e:
-            logger.error(f"Ошибка стиля: {e}")
-            await context.bot.send_message(chat_id=update.effective_chat.id, text=f"❌ Ошибка: {str(e)[:100]}")
+            await context.bot.send_message(chat_id=update.effective_chat.id, text=f"❌ {str(e)[:100]}")
 
-    # Регенерация карточки
+    # Регенерация
     elif data.startswith("regen_"):
-        parts = data.split("_", 2)
+        parts   = data.split("_", 2)
         mp      = parts[1]
         product = parts[2] if len(parts) > 2 else ""
         await query.edit_message_text("⏳ Генерирую заново...")
@@ -781,29 +799,26 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             result = await generate_card(product, mp)
             await send_card_result(query.message, result, mp, product, context.bot, user_id)
         except Exception as e:
-            await query.edit_message_text(f"❌ Ошибка: {str(e)[:100]}")
+            await query.edit_message_text(f"❌ {str(e)[:100]}")
 
-    # Меню — что умею
     elif data == "card_skills":
         await query.edit_message_text(
             "🛍️ *КАРТОЧНИК — ЧТО УМЕЮ*\n\n"
-            "📦 *Маркетплейсы (RU):*\n"
+            "📦 *Маркетплейсы RU:*\n"
             " • Wildberries — карточки, SEO, ключи\n"
             " • Ozon — карточки, rich-контент\n"
             " • Яндекс Маркет — карточки, атрибуты\n\n"
-            "🌍 *Маркетплейсы (EN):*\n"
+            "🌍 *Маркетплейсы EN:*\n"
             " • Amazon — product listings, SEO\n"
-            " • Etsy — listings, descriptions\n"
-            " • eBay — product descriptions\n\n"
-            "🖼 *Инфографика:*\n"
-            " • Студийный / Тёмный / Hype / Natural / Тёплый\n"
-            " • С фото клиента или AI-генерация\n\n"
-            "📤 Заказы с бирж сначала идут через *Лилу* —\n"
-            "она переводит, объясняет, фильтрует!",
+            " • Etsy — handmade listings\n\n"
+            "🖼 *Инфографика 5 стилей:*\n"
+            " Студийный / Тёмный / Hype / Natural / Тёплый\n\n"
+            "🤖 *Работа с заказами:*\n"
+            " • Ищу заказы на биржах каждые 30 мин\n"
+            " • Все заказы фильтрует *Лила* → лучшие тебе!\n"
+            " • Выполняю и сдаю на проверку Лиле",
             parse_mode='Markdown',
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("◀️ Назад", callback_data="card_back_main")
-            ]])
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Назад", callback_data="card_back_main")]])
         )
 
     elif data == "card_kwork":
@@ -812,8 +827,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "📦 *Карточки WB/Ozon/ЯМ:*\n"
             " • Эконом (текст): 400₽\n"
             " • Стандарт (текст + SEO): 1200₽\n"
-            " • Бизнес (текст + SEO + фото): 2000₽\n\n"
-            "🌍 *Amazon/Etsy/eBay:*\n"
+            " • Бизнес (текст + SEO + инфографика): 2000₽\n\n"
+            "🌍 *Amazon/Etsy:*\n"
             " • от $8 за listing\n\n"
             f"🔗 [Все кворки на Kwork]({KWORK_URL})",
             parse_mode='Markdown',
@@ -824,12 +839,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     elif data == "card_price":
-        keyboard = [
-            [InlineKeyboardButton("💎 Оплата USDT",        callback_data="pay_usdt")],
-            [InlineKeyboardButton("⭐ Telegram Stars",      callback_data="pay_stars")],
-            [InlineKeyboardButton("🇷🇺 Рубли (СБП/ЮMoney)", callback_data="pay_rub")],
-            [InlineKeyboardButton("◀️ Назад",              callback_data="card_back_main")],
-        ]
         await query.edit_message_text(
             "💰 *ПРАЙС*\n\n"
             "🟢 Эконом — 1 карточка: $5 / 50⭐ / 400₽\n"
@@ -837,24 +846,27 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "🟣 Бизнес — 10 карточек: $35 / 350⭐\n"
             "🌍 Amazon/Etsy — от $8 за listing",
             parse_mode='Markdown',
-            reply_markup=InlineKeyboardMarkup(keyboard)
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("💎 USDT",           callback_data="pay_usdt")],
+                [InlineKeyboardButton("⭐ Telegram Stars", callback_data="pay_stars")],
+                [InlineKeyboardButton("🇷🇺 Рубли",         callback_data="pay_rub")],
+                [InlineKeyboardButton("◀️ Назад",          callback_data="card_back_main")],
+            ])
         )
 
     elif data == "card_stats_btn":
-        stats     = get_stats()
-        by_status = stats['by_status']
+        stats = get_stats()
+        bs    = stats['by_status']
         await query.edit_message_text(
             f"📊 *СТАТИСТИКА*\n\n"
-            f"🔍 Найдено: {by_status.get('found', 0)}\n"
-            f"✅ Принято: {by_status.get('accepted', 0)}\n"
-            f"✨ Выполнено: {by_status.get('completed', 0)}\n"
-            f"💰 Закрыто: {by_status.get('done', 0)}\n"
-            f"⏭ Пропущено: {by_status.get('skipped', 0)}\n\n"
+            f"🔍 Найдено: {bs.get('found',0)}\n"
+            f"✅ Принято: {bs.get('accepted',0)}\n"
+            f"✨ Выполнено: {bs.get('completed',0)}\n"
+            f"💰 Закрыто: {bs.get('done',0)}\n"
+            f"⏭ Пропущено: {bs.get('skipped',0)}\n\n"
             f"💵 Заработано: ${stats['earn_usd']:.2f} / ₽{stats['earn_rub']:.0f}",
             parse_mode='Markdown',
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("◀️ Назад", callback_data="card_back_main")
-            ]])
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Назад", callback_data="card_back_main")]])
         )
 
     elif data == "card_back_main":
@@ -864,32 +876,31 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=_card_main_keyboard()
         )
 
-    # Оплата USDT
     elif data == "pay_usdt":
-        keyboard = [
-            [InlineKeyboardButton("1 карточка — $5", callback_data="invoice_5")],
-            [InlineKeyboardButton("5 карточек — $20", callback_data="invoice_20")],
-            [InlineKeyboardButton("10 карточек — $35", callback_data="invoice_35")],
-            [InlineKeyboardButton("50 карточек — $150", callback_data="invoice_150")],
-            [InlineKeyboardButton("✏️ Своя сумма", callback_data="invoice_custom")],
-        ]
         await query.edit_message_text(
             "💎 *Оплата в USDT*\n\nВыбери пакет:",
-            parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard)
+            parse_mode='Markdown',
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("1 карточка — $5",   callback_data="invoice_5")],
+                [InlineKeyboardButton("5 карточек — $20",  callback_data="invoice_20")],
+                [InlineKeyboardButton("10 карточек — $35", callback_data="invoice_35")],
+                [InlineKeyboardButton("50 карточек — $150",callback_data="invoice_150")],
+                [InlineKeyboardButton("✏️ Своя сумма",     callback_data="invoice_custom")],
+            ])
         )
 
     elif data == "pay_stars":
-        keyboard = [
-            [InlineKeyboardButton("⭐ 50 Stars — 1 карточка", callback_data="stars_50")],
-            [InlineKeyboardButton("⭐ 200 Stars — 5 карточек", callback_data="stars_200")],
-            [InlineKeyboardButton("⭐ 350 Stars — 10 карточек", callback_data="stars_350")],
-            [InlineKeyboardButton("⭐ 1500 Stars — 50 карточек", callback_data="stars_1500")],
-        ]
         await query.edit_message_text(
             "⭐ *Telegram Stars*\n\n"
-            "50 ⭐ = 1 карточка\n200 ⭐ = 5 карточек\n"
-            "350 ⭐ = 10 карточек\n1500 ⭐ = 50 карточек\n\nВыбери пакет:",
-            parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard)
+            "50⭐ = 1 карточка\n200⭐ = 5 карточек\n"
+            "350⭐ = 10 карточек\n1500⭐ = 50 карточек",
+            parse_mode='Markdown',
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("⭐ 50 Stars",   callback_data="stars_50")],
+                [InlineKeyboardButton("⭐ 200 Stars",  callback_data="stars_200")],
+                [InlineKeyboardButton("⭐ 350 Stars",  callback_data="stars_350")],
+                [InlineKeyboardButton("⭐ 1500 Stars", callback_data="stars_1500")],
+            ])
         )
 
     elif data == "pay_rub":
@@ -907,22 +918,18 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("✏️ Напиши сумму в USD:\n\nПример: `25`", parse_mode='Markdown')
         else:
             amount = float(amount_str)
-            descriptions = {5: "1 product listing", 20: "5 product listings",
-                            35: "10 product listings", 150: "50 product listings"}
+            descriptions = {5:"1 product listing",20:"5 product listings",35:"10 product listings",150:"50 product listings"}
             desc = descriptions.get(amount, f"${amount} package")
-            msg = (
-                f"💎 *INVOICE / СЧЁТ*\n\n📋 Service: *{desc}*\n💰 Amount: *${amount:.2f} USDT*\n\n"
-                f"━━━━━━━━━━━━━━━━\n📲 *Payment via @wallet:*\n\n"
-                f"1️⃣ Open @wallet in Telegram\n2️⃣ Tap Send → Crypto\n"
-                f"3️⃣ Choose USDT TRC20\n4️⃣ Paste address:\n`{USDT_WALLET}`\n"
-                f"5️⃣ Amount: `{amount}` USDT\n\n━━━━━━━━━━━━━━━━\n"
-                f"⚡ After payment tap button below\n🕐 Work starts within 5 minutes"
-            )
-            keyboard = [[
-                InlineKeyboardButton("✅ I paid / Оплатил", callback_data=f"payment_confirm_{amount}"),
-                InlineKeyboardButton("❌ Cancel", callback_data="payment_cancel")
-            ]]
-            await query.edit_message_text(msg, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
+            msg = (f"💎 *INVOICE / СЧЁТ*\n\n📋 Service: *{desc}*\n💰 Amount: *${amount:.2f} USDT*\n\n"
+                   f"━━━━━━━━━━━━━━━━\n📲 *Payment via @wallet:*\n\n"
+                   f"1️⃣ Open @wallet in Telegram\n2️⃣ Send → Crypto → USDT TRC20\n"
+                   f"3️⃣ Paste address:\n`{USDT_WALLET}`\n"
+                   f"4️⃣ Amount: `{amount}` USDT\n\n━━━━━━━━━━━━━━━━\n"
+                   f"⚡ After payment tap button below")
+            await query.edit_message_text(msg, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("✅ Оплатил!", callback_data=f"payment_confirm_{amount}"),
+                InlineKeyboardButton("❌ Отмена",   callback_data="card_back_main")
+            ]]))
 
     elif data.startswith("payment_confirm_"):
         amount   = float(data[16:])
@@ -930,13 +937,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         username = f"@{user.username}" if user.username else user.first_name
         await context.bot.send_message(
             chat_id=YOUR_CHAT_ID,
-            text=(f"💰 *ОПЛАТА!*\n\n👤 {username}\n💎 ${amount:.2f} USDT\n"
-                  f"🕐 {datetime.now().strftime('%d.%m.%Y %H:%M')}\n\n⚡ Проверь кошелёк!"),
+            text=f"💰 *ОПЛАТА!*\n\n👤 {username}\n💎 ${amount:.2f} USDT\n🕐 {datetime.now().strftime('%d.%m.%Y %H:%M')}\n\n⚡ Проверь кошелёк!",
             parse_mode='Markdown'
         )
         await query.edit_message_text(
-            f"✅ *Thank you!*\n\nPayment ${amount:.2f} USDT confirmed.\nWork starts in 5 min!\n\n"
-            f"📱 Send your product info / Отправь данные товара",
+            f"✅ *Спасибо!*\n\nОплата ${amount:.2f} USDT подтверждена.\nНачинаем через 5 мин!\n\n📱 Отправь данные товара",
             parse_mode='Markdown'
         )
         user_sessions[user.id] = {"step": "waiting_product", "marketplace": "all", "paid": True}
@@ -944,42 +949,34 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data.startswith("stars_"):
         stars = int(data[6:])
         stars_map = {
-            50:   ("1 карточка товара", "Профессиональная карточка для WB, Ozon или Amazon"),
-            200:  ("5 карточек товаров", "5 профессиональных карточек"),
-            350:  ("10 карточек товаров", "10 профессиональных карточек — скидка 30%"),
-            1500: ("50 карточек товаров", "50 профессиональных карточек — скидка 40%"),
+            50:  ("1 карточка товара",    "Профессиональная карточка для WB, Ozon или Amazon"),
+            200: ("5 карточек товаров",   "5 профессиональных карточек"),
+            350: ("10 карточек товаров",  "10 карточек — скидка 30%"),
+            1500:("50 карточек товаров",  "50 карточек — скидка 40%"),
         }
         title, description = stars_map.get(stars, ("Карточки", "Профессиональные карточки"))
         await send_stars_invoice(update, context, stars, title, description)
 
     elif data.startswith("take_"):
         job_id = data[5:]
-        job = get_job(job_id)
+        job    = get_job(job_id)
         if not job:
             await query.edit_message_text("❌ Заказ не найден")
             return
         update_job(job_id, 'accepted')
-        await query.edit_message_text(
-            f"✅ *Берём!*\n📌 {job['title'][:80]}\n\n⏳ Выполняю...", parse_mode='Markdown'
-        )
+        await query.edit_message_text(f"✅ *Берём!*\n📌 {job['title'][:80]}\n\n⏳ Выполняю...", parse_mode='Markdown')
         try:
             result = await execute_card_job(job)
             update_job(job_id, 'completed', result)
             keyboard = [[
                 InlineKeyboardButton("👍 ОК, сдаём!", callback_data=f"done_{job_id}"),
-                InlineKeyboardButton("✏️ Правка", callback_data=f"redo_{job_id}")
+                InlineKeyboardButton("✏️ Правка",     callback_data=f"redo_{job_id}")
             ]]
             msg = (f"✨ *КАРТОЧКИ ГОТОВЫ!*\n\n📌 *{job['title'][:80]}*\n\n"
                    f"━━━━━━━━━━\n{result[:2500]}\n━━━━━━━━━━\n\n*Лила, проверь — отправляем?*")
-            await context.bot.send_message(
-                chat_id=YOUR_CHAT_ID, text=msg,
-                parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard)
-            )
+            await context.bot.send_message(chat_id=YOUR_CHAT_ID, text=msg, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
             if LILU_CHAT_ID and LILU_CHAT_ID != YOUR_CHAT_ID:
-                await context.bot.send_message(
-                    chat_id=LILU_CHAT_ID, text=msg,
-                    parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard)
-                )
+                await context.bot.send_message(chat_id=LILU_CHAT_ID, text=msg, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
         except Exception as e:
             await context.bot.send_message(chat_id=YOUR_CHAT_ID, text=f"❌ Ошибка: {str(e)[:200]}")
 
@@ -991,13 +988,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         job_id = data[5:]
         job    = get_job(job_id)
         update_job(job_id, 'done')
-        nums = re.findall(r'\d+', job.get('budget','0').replace(' ',''))
-        amount = float(nums[0]) if nums else 0
-        is_rub = '₽' in job.get('budget','') or 'руб' in job.get('budget','').lower()
-        if is_rub:
-            save_earning(job_id, amount/90, amount, job['title'])
-        else:
-            save_earning(job_id, amount, amount*90, job['title'])
+        if job:
+            nums = re.findall(r'\d+', job.get('budget','0').replace(' ',''))
+            amount = float(nums[0]) if nums else 0
+            is_rub = '₽' in job.get('budget','') or 'руб' in job.get('budget','').lower()
+            save_earning(job_id, amount/90 if is_rub else amount, amount if is_rub else amount*90, job['title'])
         stats = get_stats()
         await query.edit_message_text(
             f"💰 *ЗАКРЫТ!*\n\n✅ Выполнено: {stats['by_status'].get('done',0)}\n"
@@ -1008,78 +1003,74 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data.startswith("redo_"):
         job_id = data[5:]
         job    = get_job(job_id)
-        context.user_data['redo_job_id']  = job_id
-        context.user_data['redo_result']  = job.get('result','') if job else ''
+        context.user_data['redo_job_id'] = job_id
+        context.user_data['redo_result'] = job.get('result','') if job else ''
         await query.edit_message_text(
-            "✏️ *Напиши что исправить:*\n\nПример: _сократи_, _переведи на английский_",
+            "✏️ *Напиши что исправить:*\n\nПример: _сократи_, _добавь ключевые слова_",
             parse_mode='Markdown'
         )
 
-# ═══ ВСПОМОГАТЕЛЬНЫЕ ═══
+# ═══ КОМАНДЫ ═══
 
-def _style_keyboard(current_style: str, product_short: str) -> list:
-    rows = []
-    for sk, sd in IMAGE_STYLES.items():
-        emoji = "✅ " if sk == current_style else ""
-        rows.append([InlineKeyboardButton(
-            f"{emoji}{sd['name']} — {sd['desc']}",
-            callback_data=f"style_{sk}_{product_short}"
-        )])
-    return rows
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "🛍️ *КарточникБот*\n\n"
+        "Генерирую карточки + инфографику для маркетплейсов!\n\n"
+        "📸 *Пришли фото товара* — сделаю карточку как у топов\n"
+        "📝 *Или напиши название* — сгенерирую сам\n\n"
+        "🔍 Ищу заказы каждые 30 мин → фильтрует *Лила* → лучшее тебе!\n\n"
+        "Выбери маркетплейс:",
+        parse_mode='Markdown',
+        reply_markup=_card_main_keyboard()
+    )
 
-async def send_card_result(message, result, marketplace, product, bot, user_id=None):
-    if marketplace == "all":
-        for mp, data in result.items():
-            text = format_card(data, mp)
-            await bot.send_message(chat_id=message.chat_id, text=text[:4000], parse_mode='Markdown')
-            await asyncio.sleep(0.5)
-        # Генерируем инфографику для первого маркетплейса
-        mp0   = list(result.keys())[0]
-        data0 = list(result.values())[0]
-        title = data0.get("title", product)
-        photo_b = user_sessions.get(user_id, {}).get("last_photo_bytes") if user_id else None
-        img_bytes = await generate_product_image(product, data0, mp0, "studio", photo_b)
-        style_kb = _style_keyboard("studio", product[:15])
-        await bot.send_photo(
-            chat_id=message.chat_id, photo=img_bytes,
-            caption="🖼 *Инфографика готова!*\n\n💡 Выбери стиль:",
-            parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(style_kb)
-        )
-    else:
-        text = format_card(result, marketplace)
-        await bot.send_message(chat_id=message.chat_id, text=text[:4000], parse_mode='Markdown')
-        title   = result.get("title", product)
-        photo_b = user_sessions.get(user_id, {}).get("last_photo_bytes") if user_id else None
-        img_bytes = await generate_product_image(product, result, marketplace, "studio", photo_b)
-        style_kb  = _style_keyboard("studio", product[:15])
-        await bot.send_photo(
-            chat_id=message.chat_id, photo=img_bytes,
-            caption=(
-                f"🖼 *Студийный стиль*\n\n"
-                f"✅ {'На основе вашего фото!' if photo_b else 'Инфографика готова!'}\n\n"
-                f"💡 Выбери другой стиль:"
-            ),
-            parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(style_kb)
-        )
+async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg   = await update.message.reply_text("🔍 Ищу заказы на карточки...")
+    count = await check_card_jobs(context.application.bot)
+    await msg.edit_text(
+        f"✅ Найдено и отправлено Лиле: *{count}* заказов\n\n"
+        f"{'Лила анализирует — лучшие придут тебе! 🚀' if count>0 else 'Пока 0 — попробуй /clear и снова'}",
+        parse_mode='Markdown'
+    )
 
-# ═══ STARS INVOICE ═══
+async def clear_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('DELETE FROM seen_jobs')
+    conn.commit()
+    conn.close()
+    await update.message.reply_text("🗑️ Кэш очищен! Теперь /scan найдёт заново.")
 
-async def send_stars_invoice(update, context, stars, title, description):
-    try:
-        await context.bot.send_invoice(
-            chat_id=update.effective_chat.id,
-            title=title, description=description,
-            payload=f"card_order_{stars}_{update.effective_user.id}",
-            currency="XTR",
-            prices=[{"label": title, "amount": stars}],
-            provider_token=""
-        )
-    except Exception as e:
-        logger.error(f"Stars invoice ошибка: {e}")
-        await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text=f"⭐ Оплата {stars} Stars — напиши нам и мы выставим счёт вручную."
-        )
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    stats = get_stats()
+    bs    = stats['by_status']
+    await update.message.reply_text(
+        f"📊 *СТАТИСТИКА КАРТОЧНИКА*\n\n"
+        f"🔍 Найдено: {bs.get('found',0)}\n"
+        f"✅ Принято: {bs.get('accepted',0)}\n"
+        f"✨ Выполнено: {bs.get('completed',0)}\n"
+        f"💰 Закрыто: {bs.get('done',0)}\n"
+        f"⏭ Пропущено: {bs.get('skipped',0)}\n\n"
+        f"💵 Заработано: ${stats['earn_usd']:.2f} / ₽{stats['earn_rub']:.0f}\n"
+        f"📦 Всего выплат: {stats['earn_count']}",
+        parse_mode='Markdown'
+    )
+
+async def price_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "💰 *ПРАЙС — КАРТОЧКИ ТОВАРОВ*\n\n"
+        "🟢 *Эконом* — 1 карточка: $5 / 50⭐ / 400₽\n"
+        "🔵 *Стандарт* — 5 карточек: $20 / 200⭐\n"
+        "🟣 *Бизнес* — 10 карточек: $35 / 350⭐\n"
+        "🌍 *Amazon/Etsy* — от $8 за listing\n\n"
+        "Способ оплаты:",
+        parse_mode='Markdown',
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("💎 USDT",           callback_data="pay_usdt")],
+            [InlineKeyboardButton("⭐ Telegram Stars", callback_data="pay_stars")],
+            [InlineKeyboardButton("🇷🇺 Рубли",         callback_data="pay_rub")],
+        ])
+    )
 
 # ═══ ОБРАБОТЧИК СООБЩЕНИЙ ═══
 
@@ -1093,16 +1084,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         fix      = update.message.text
         await update.message.reply_text("⏳ Исправляю...")
         try:
-            async with httpx.AsyncClient(timeout=60) as client:
-                r = await client.post(
-                    "https://api.groq.com/openai/v1/chat/completions",
-                    headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
-                    json={"model": "llama-3.3-70b-versatile",
-                          "messages": [{"role": "user", "content":
-                              f"Исправь карточку товара.\n\nОРИГИНАЛ:\n{original[:2000]}\n\nИНСТРУКЦИЯ: {fix}\n\nВерни полный исправленный текст."}],
-                          "max_tokens": 2000}
-                )
-                new_result = r.json()["choices"][0]["message"]["content"].strip()
+            new_result = await redo_card_job(original, fix)
             update_job(job_id, 'completed', new_result)
             context.user_data['redo_result'] = new_result
             keyboard = [[
@@ -1121,16 +1103,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Не выбран маркетплейс
     if user_id not in user_sessions or user_sessions[user_id].get('step') != 'waiting_product':
-        keyboard = [[
-            InlineKeyboardButton("🟣 WB",   callback_data="mp_wb"),
-            InlineKeyboardButton("🔵 Ozon", callback_data="mp_ozon"),
-            InlineKeyboardButton("🟡 ЯМ",   callback_data="mp_ym"),
-            InlineKeyboardButton("🎯 Все",  callback_data="mp_all"),
-        ]]
-        await update.message.reply_text(
-            "👇 Сначала выбери маркетплейс:",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
+        await update.message.reply_text("👇 Сначала выбери маркетплейс:", reply_markup=_card_main_keyboard())
         return
 
     marketplace  = user_sessions[user_id]['marketplace']
@@ -1138,10 +1111,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     photo_bytes  = None
     product      = ""
 
-    # ─── ФОТО ТОВАРА ───
     if update.message.photo:
         await update.message.reply_text(
-            "📸 *Фото получено!*\n\n⏳ Генерирую карточку и инфографику с твоим товаром...",
+            "📸 *Фото получено!*\n\n⏳ Генерирую карточку...",
             parse_mode='Markdown'
         )
         photo      = update.message.photo[-1]
@@ -1154,130 +1126,54 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             os.unlink(tmp.name)
         product = update.message.caption or "товар на фото"
 
-    # ─── ТОЛЬКО ТЕКСТ ───
     elif update.message.text:
         product = update.message.text
         await update.message.reply_text(
             f"⏳ Генерирую карточку для *{product[:40]}*...\n\n"
-            f"_Совет: пришли фото товара — инфографика будет красивее!_",
+            f"_Совет: пришли фото — инфографика будет лучше!_",
             parse_mode='Markdown'
         )
     else:
         await update.message.reply_text("Отправь текст или фото товара!")
         return
 
-    # Сохраняем в сессию для смены стиля
     session_mp = marketplace if marketplace != "all" else "wb"
-    user_sessions[user_id]['last_product']    = product
-    user_sessions[user_id]['last_marketplace'] = session_mp
-    user_sessions[user_id]['last_photo_bytes'] = photo_bytes
+    user_sessions[user_id].update({
+        'last_product': product,
+        'last_marketplace': session_mp,
+        'last_photo_bytes': photo_bytes
+    })
 
     try:
         result = await generate_card(product, marketplace, image_base64)
-        # Сохраняем card_data для смены стиля
         if marketplace == "all":
             user_sessions[user_id]['last_card_data'] = list(result.values())[0]
         else:
             user_sessions[user_id]['last_card_data'] = result
-
         await send_card_result(update.message, result, marketplace, product, context.bot, user_id)
         user_sessions[user_id]['step'] = 'done'
-
     except Exception as e:
-        logger.error(f"Ошибка: {e}")
-        await update.message.reply_text(
-            f"❌ Ошибка. Попробуй ещё раз.\n`{str(e)[:100]}`",
-            parse_mode='Markdown'
-        )
+        logger.error(f"Ошибка генерации: {e}")
+        await update.message.reply_text(f"❌ Ошибка. Попробуй ещё раз.\n`{str(e)[:100]}`", parse_mode='Markdown')
 
-# ═══ КОМАНДЫ ═══
+# ═══ АВТОСКАНИРОВАНИЕ ЧЕРЕЗ ASYNCIO (без JobQueue!) ═══
 
-def _card_main_keyboard():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🟣 WB",   callback_data="mp_wb"),
-         InlineKeyboardButton("🔵 Ozon", callback_data="mp_ozon"),
-         InlineKeyboardButton("🟡 ЯМ",   callback_data="mp_ym"),
-         InlineKeyboardButton("🎯 Все",  callback_data="mp_all")],
-        [InlineKeyboardButton("🧠 Что умею",    callback_data="card_skills"),
-         InlineKeyboardButton("🛍️ Наши кворки", callback_data="card_kwork")],
-        [InlineKeyboardButton("💰 Прайс",       callback_data="card_price"),
-         InlineKeyboardButton("📊 Статистика",   callback_data="card_stats_btn")],
-    ])
-
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "🛍️ *КарточникБот*\n\n"
-        "Генерирую карточки товаров + инфографику для маркетплейсов!\n\n"
-        "📸 *Пришли фото товара* — сделаю карточку как у конкурентов\n"
-        "📝 *Или напиши название* — сгенерирую сам\n\n"
-        "🔍 Ищу заказы → фильтрует *Лила* → только лучшее тебе!\n\n"
-        "Выбери маркетплейс или действие:",
-        parse_mode='Markdown',
-        reply_markup=_card_main_keyboard()
-    )
-
-async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg   = await update.message.reply_text("🔍 Ищу заказы на карточки...")
-    count = await check_card_jobs(context.application.bot)
-    await msg.edit_text(
-        f"✅ Найдено: {count}\n"
-        f"{'Заказы летят! 🚀' if count > 0 else 'Пока 0 — попробуй /clear и снова /scan'}"
-    )
-
-async def clear_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('DELETE FROM seen_jobs')
-    conn.commit()
-    conn.close()
-    await update.message.reply_text("🗑️ Кэш очищен! Теперь /scan найдёт заказы заново.")
-
-async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    stats     = get_stats()
-    by_status = stats['by_status']
-    text = (
-        f"📊 *СТАТИСТИКА КАРТОЧНИКА*\n\n"
-        f"🔍 Найдено: {by_status.get('found', 0)}\n"
-        f"✅ Принято: {by_status.get('accepted', 0)}\n"
-        f"✨ Выполнено: {by_status.get('completed', 0)}\n"
-        f"💰 Закрыто: {by_status.get('done', 0)}\n"
-        f"⏭ Пропущено: {by_status.get('skipped', 0)}\n\n"
-        f"💵 Заработано: ${stats['earn_usd']:.2f} / ₽{stats['earn_rub']:.0f}\n"
-        f"📦 Всего заказов: {stats['earn_count']}"
-    )
-    await update.message.reply_text(text, parse_mode='Markdown')
-
-async def price_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [
-        [InlineKeyboardButton("💎 Оплата USDT",        callback_data="pay_usdt")],
-        [InlineKeyboardButton("⭐ Telegram Stars",      callback_data="pay_stars")],
-        [InlineKeyboardButton("🇷🇺 Рубли (СБП/ЮMoney)", callback_data="pay_rub")],
-    ]
-    await update.message.reply_text(
-        "💰 *ПРАЙС — КАРТОЧКИ ТОВАРОВ*\n\n"
-        "🛍️ *Wildberries / Ozon / ЯМ*\n\n"
-        "🟢 *Эконом* — текст\n"
-        " • 1 карточка: $5 / 50⭐ / 400₽\n\n"
-        "🔵 *Стандарт* — текст + SEO\n"
-        " • 5 карточек: $20 / 200⭐\n\n"
-        "🟣 *Бизнес* — текст + SEO + инфографика\n"
-        " • 10 карточек: $35 / 350⭐\n\n"
-        "🌍 *Amazon / Etsy / eBay*\n"
-        " • от $8 за карточку\n\n"
-        "Выбери способ оплаты:",
-        parse_mode='Markdown',
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-
-# ═══ АВТОСКАНИРОВАНИЕ ═══
-
-async def auto_scan(context):
-    logger.info("🔄 Автосканирование...")
-    try:
-        count = await check_card_jobs(context.bot)
-        logger.info(f"✅ Найдено {count} заказов")
-    except Exception as e:
-        logger.error(f"❌ Автосканирование: {e}")
+async def auto_scan_loop(bot):
+    """Бесконечный цикл — каждые 30 минут. Без APScheduler."""
+    await asyncio.sleep(90)
+    while True:
+        logger.info("🔄 Карточник: автосканирование...")
+        try:
+            count = await check_card_jobs(bot)
+            if count > 0 and YOUR_CHAT_ID:
+                await bot.send_message(
+                    chat_id=YOUR_CHAT_ID,
+                    text=f"🛍️ *Карточник нашёл {count} заказов* — отправил Лиле на проверку!",
+                    parse_mode='Markdown'
+                )
+        except Exception as e:
+            logger.error(f"❌ Автосканирование: {e}")
+        await asyncio.sleep(1800)
 
 # ═══ ЗАПУСК ═══
 
@@ -1285,19 +1181,39 @@ def main():
     init_db()
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
-    app.add_handler(CommandHandler("start",  start_command))
-    app.add_handler(CommandHandler("scan",   scan_command))
-    app.add_handler(CommandHandler("clear",  clear_command))
-    app.add_handler(CommandHandler("stats",  stats_command))
-    app.add_handler(CommandHandler("price",  price_command))
+    app.add_handler(CommandHandler("start", start_command))
+    app.add_handler(CommandHandler("scan",  scan_command))
+    app.add_handler(CommandHandler("clear", clear_command))
+    app.add_handler(CommandHandler("stats", stats_command))
+    app.add_handler(CommandHandler("price", price_command))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.PHOTO, handle_message))
 
-    # Автосканирование каждые 30 минут
-    app.job_queue.run_repeating(auto_scan, interval=1800, first=60)
+    async def post_init(application):
+        asyncio.create_task(auto_scan_loop(application.bot))
+        logger.info("✅ Автосканирование запущено (asyncio)")
+        try:
+            if YOUR_CHAT_ID:
+                await application.bot.send_message(
+                    chat_id=YOUR_CHAT_ID,
+                    text=(
+                        "🛍️ *Карточник запущен!*\n\n"
+                        "⚡️ Работаю на Anthropic Claude Haiku\n"
+                        "✅ Автосканирование каждые 30 мин\n"
+                        "📨 Заказы идут через Лилу\n\n"
+                        "/scan — найти сейчас\n"
+                        "/price — прайс\n"
+                        "/stats — статистика"
+                    ),
+                    parse_mode='Markdown'
+                )
+        except Exception as e:
+            logger.error(f"post_init: {e}")
 
-    logger.info("🛍️ КарточникБот запущен!")
+    app.post_init = post_init
+
+    logger.info("🛍️ Карточник запущен на Anthropic!")
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":

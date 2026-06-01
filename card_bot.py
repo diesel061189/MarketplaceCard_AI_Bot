@@ -1294,9 +1294,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"❌ Ошибка: {str(e)[:100]}")
         return
 
-    # Не выбран маркетплейс
+    # Не выбран маркетплейс — показываем стартовый экран
     if user_id not in user_sessions or user_sessions[user_id].get('step') != 'waiting_product':
-        await update.message.reply_text("👇 Сначала выбери маркетплейс:", reply_markup=_card_main_keyboard())
+        await update.message.reply_text(
+            "🛍️ *КарточникБот*\n\n"
+            "Генерирую карточки + инфографику для маркетплейсов!\n\n"
+            "📸 *Пришли фото товара* — сделаю карточку как у топов\n"
+            "📝 *Или напиши название* — сгенерирую сам\n\n"
+            "🎨 Визуал через *Aidentika* — профессиональный результат\n\n"
+            "👇 Выбери маркетплейс:",
+            parse_mode='Markdown',
+            reply_markup=_card_main_keyboard()
+        )
         return
 
     marketplace  = user_sessions[user_id]['marketplace']

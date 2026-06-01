@@ -1173,9 +1173,35 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             await context.bot.send_message(chat_id=YOUR_CHAT_ID, text=f"❌ Ошибка: {str(e)[:200]}")
 
-    elif data.startswith("skip_"):
+    elif data == "skip_wishes":
+        user_sessions[user_id]['wishes'] = ''
+        user_sessions[user_id]['step'] = 'waiting_product'
+        await query.edit_message_text("⚡ Генерирую без пожеланий...")
+        await generate_and_send_cards(query, context, user_id)
+
+    elif data.startswith("skip_") and data != "skip_wishes":
         update_job(data[5:], 'skipped')
         await query.edit_message_text("⏭ Пропустили")
+
+    elif data == "feedback_ok":
+        await query.edit_message_text(
+            "🎉 *Отлично! Карточки готовы к публикации!*\n\n"
+            "Если нужна ещё одна — просто пришли новое фото.",
+            parse_mode='Markdown'
+        )
+        user_sessions[user_id]['step'] = 'waiting_product'
+
+    elif data == "feedback_edit":
+        await query.edit_message_text(
+            "✏️ *Что именно изменить?*\n\n"
+            "Напиши пожелания:\n\n"
+            "• _тёмный фон_\n"
+            "• _другой стиль текста_\n"
+            "• _добавь цену_\n"
+            "• _более агрессивный дизайн_",
+            parse_mode='Markdown'
+        )
+        user_sessions[user_id]['step'] = 'waiting_wishes'
 
     elif data.startswith("done_"):
         job_id = data[5:]
@@ -1267,6 +1293,108 @@ async def price_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ═══ ОБРАБОТЧИК СООБЩЕНИЙ ═══
 
+async def generate_and_send_cards(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: int):
+    """Генерирует classic + premium карточки и спрашивает обратную связь"""
+    session      = user_sessions.get(user_id, {})
+    product      = session.get('last_product', 'товар')
+    marketplace  = session.get('last_marketplace', 'wb')
+    photo_bytes  = session.get('last_photo_bytes')
+    image_base64 = session.get('last_image_base64')
+    wishes       = session.get('wishes', '')
+
+    await update.message.reply_text(
+        f"🎨 *Генерирую карточки...*\n\n"
+        f"{'💬 Учитываю: _' + wishes[:60] + '_' if wishes else '⚡ Без пожеланий'}\n\n"
+        f"⏳ Обычно 60-90 секунд — делаю classic и premium",
+        parse_mode='Markdown'
+    )
+
+    try:
+        if AIDENTIKA_API_KEY and image_base64:
+            # Загружаем фото
+            upload_id = await aidentika_upload(image_base64)
+            if not upload_id:
+                raise Exception("Не удалось загрузить фото")
+
+            # Генерируем текст
+            text_result = await generate_card(product, marketplace, image_base64)
+            card_data = list(text_result.values())[0] if marketplace == "all" else text_result
+            base_features = "\n".join(card_data.get("преимущества", [])[:5]) if isinstance(card_data, dict) else product
+            features_text = f"{base_features}\n{wishes}" if wishes else base_features
+
+            # Запускаем CLASSIC и PREMIUM параллельно
+            action_classic, action_premium = await asyncio.gather(
+                aidentika_generate_card(upload_id, product_name=product[:100], features=features_text, style="classic"),
+                aidentika_generate_card(upload_id, product_name=product[:100], features=features_text, style="premium")
+            )
+
+            async def empty_bytes(): return b""
+
+            img_classic, img_premium = await asyncio.gather(
+                aidentika_wait_and_download(action_classic) if action_classic else empty_bytes(),
+                aidentika_wait_and_download(action_premium) if action_premium else empty_bytes()
+            )
+
+            sent_any = False
+            if img_classic:
+                await context.bot.send_photo(
+                    chat_id=update.effective_chat.id,
+                    photo=io.BytesIO(img_classic),
+                    caption=f"🎨 *Вариант 1 — Классический*\n\n_{product[:60]}_",
+                    parse_mode='Markdown'
+                )
+                sent_any = True
+
+            if img_premium:
+                await context.bot.send_photo(
+                    chat_id=update.effective_chat.id,
+                    photo=io.BytesIO(img_premium),
+                    caption=f"✨ *Вариант 2 — Премиум*\n\n_{product[:60]}_",
+                    parse_mode='Markdown'
+                )
+                sent_any = True
+
+            if sent_any:
+                await send_card_result(update.message, text_result, marketplace, product, context.bot, user_id, skip_image=True)
+
+                # Проверяем баланс
+                balance = await aidentika_balance()
+                balance_msg = f"\n\n⚠️ Осталось {balance} искр — пополни баланс!" if 0 <= balance < 8 else ""
+
+                # Спрашиваем обратную связь
+                keyboard = InlineKeyboardMarkup([[
+                    InlineKeyboardButton("✅ Всё отлично!", callback_data="feedback_ok"),
+                    InlineKeyboardButton("✏️ Хочу изменить", callback_data="feedback_edit")
+                ]])
+                await update.message.reply_text(
+                    f"👆 *Два варианта готовы!*\n\n"
+                    f"Выбери который нравится и скажи — всё устраивает?{balance_msg}",
+                    parse_mode='Markdown',
+                    reply_markup=keyboard
+                )
+                user_sessions[user_id]['step'] = 'waiting_feedback'
+                return
+
+        # Fallback — только текст без Aidentika
+        result = await generate_card(product, marketplace, image_base64)
+        await send_card_result(update.message, result, marketplace, product, context.bot, user_id)
+
+        keyboard = InlineKeyboardMarkup([[
+            InlineKeyboardButton("✅ Всё отлично!", callback_data="feedback_ok"),
+            InlineKeyboardButton("✏️ Хочу изменить", callback_data="feedback_edit")
+        ]])
+        await update.message.reply_text(
+            "📝 *Карточка готова!*\n\nВсё устраивает?",
+            parse_mode='Markdown',
+            reply_markup=keyboard
+        )
+        user_sessions[user_id]['step'] = 'waiting_feedback'
+
+    except Exception as e:
+        logger.error(f"generate_and_send_cards ошибка: {e}")
+        await update.message.reply_text(f"❌ Ошибка генерации: {str(e)[:100]}")
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
 
@@ -1295,7 +1423,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # Не выбран маркетплейс — показываем стартовый экран
-    if user_id not in user_sessions or user_sessions[user_id].get('step') != 'waiting_product':
+    if user_id not in user_sessions or user_sessions[user_id].get('step') not in ('waiting_product', 'waiting_wishes', 'waiting_feedback'):
         await update.message.reply_text(
             "🛍️ *КарточникБот*\n\n"
             "Генерирую карточки + инфографику для маркетплейсов!\n\n"
@@ -1306,6 +1434,39 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode='Markdown',
             reply_markup=_card_main_keyboard()
         )
+        return
+
+    step = user_sessions[user_id].get('step')
+
+    # ─── Шаг 2: клиент ответил на пожелания ───
+    if step == 'waiting_wishes':
+        wishes = update.message.text or ""
+        user_sessions[user_id]['wishes'] = wishes
+        user_sessions[user_id]['step'] = 'waiting_product'
+        # Запускаем генерацию с пожеланиями
+        await generate_and_send_cards(update, context, user_id)
+        return
+
+    # ─── Шаг 3: клиент ответил на вопрос "всё устраивает?" ───
+    if step == 'waiting_feedback':
+        feedback = update.message.text.lower() if update.message.text else ""
+        if any(w in feedback for w in ['нет', 'измени', 'правка', 'переделай', 'не нравится', 'плохо']):
+            user_sessions[user_id]['step'] = 'waiting_product'
+            await update.message.reply_text(
+                "✏️ *Что именно изменить?*\n\n"
+                "Напиши пожелания — и сгенерирую новые варианты:\n\n"
+                "Например: _тёмный фон_, _больше текста_, _другой стиль_",
+                parse_mode='Markdown'
+            )
+            user_sessions[user_id]['step'] = 'waiting_wishes'
+        else:
+            await update.message.reply_text(
+                "🎉 *Отлично! Карточка готова к публикации!*\n\n"
+                "Если нужна ещё одна — просто пришли новое фото или название товара.",
+                parse_mode='Markdown',
+                reply_markup=_card_main_keyboard()
+            )
+            user_sessions[user_id]['step'] = 'waiting_product'
         return
 
     marketplace  = user_sessions[user_id]['marketplace']
@@ -1323,6 +1484,42 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 image_base64 = base64.b64encode(photo_bytes).decode()
             os.unlink(tmp.name)
         product = update.message.caption or "товар на фото"
+
+    elif update.message.text:
+        product = update.message.text
+
+    else:
+        await update.message.reply_text("Отправь текст или фото товара!")
+        return
+
+    # Сохраняем данные сессии
+    session_mp = marketplace if marketplace != "all" else "wb"
+    user_sessions[user_id].update({
+        'last_product': product,
+        'last_marketplace': session_mp,
+        'last_photo_bytes': photo_bytes,
+        'last_image_base64': image_base64,
+        'wishes': ''
+    })
+
+    # Спрашиваем пожелания перед генерацией
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton("⚡ Пропустить — генерировать сразу", callback_data="skip_wishes")
+    ]])
+
+    await update.message.reply_text(
+        f"📦 *Товар:* _{product[:60]}_\n\n"
+        f"💬 *Есть пожелания к карточке?*\n\n"
+        f"Например:\n"
+        f"• _тёмный фон, агрессивный стиль_\n"
+        f"• _минимализм, белый фон, для женщин_\n"
+        f"• _яркие цвета, молодёжная аудитория_\n"
+        f"• _премиум, золотые акценты_\n\n"
+        f"Или нажми кнопку чтобы генерировать сразу:",
+        parse_mode='Markdown',
+        reply_markup=keyboard
+    )
+    user_sessions[user_id]['step'] = 'waiting_wishes'
 
         # ─── Если есть Aidentika — используем его для визуала ───
         if AIDENTIKA_API_KEY:

@@ -26,8 +26,10 @@ LILU_CHAT_ID      = int(os.getenv("LILU_CHAT_ID", str(os.getenv("YOUR_CHAT_ID", 
 LILU_BOT_TOKEN    = os.getenv("LILU_BOT_TOKEN", "")
 DB_PATH           = os.getenv("DB_PATH", "/tmp/freelance.db")
 USDT_WALLET       = os.getenv("USDT_WALLET", "TECM5HuPvi9Z6RNzbHZLtesSkKwHBLJEJc")
-GEMINI_API_KEY    = os.getenv("GEMINI_API_KEY", "")
-KWORK_URL         = os.getenv("KWORK_URL", "https://kwork.ru/user/artem_sh")
+GEMINI_API_KEY      = os.getenv("GEMINI_API_KEY", "")
+KWORK_URL           = os.getenv("KWORK_URL", "https://kwork.ru/user/artem_sh")
+AIDENTIKA_API_KEY   = os.getenv("AIDENTIKA_API_KEY", "")
+AIDENTIKA_BASE      = "https://api.aidentika.com/api/v1/public"
 
 # ═══ ANTHROPIC МОДЕЛИ ═══
 ANTHROPIC_HAIKU  = "claude-haiku-4-5-20251001"   # генерация карточек — дёшево
@@ -35,6 +37,147 @@ ANTHROPIC_SONNET = "claude-sonnet-4-6"            # анализ сложных 
 ANTHROPIC_URL    = "https://api.anthropic.com/v1/messages"
 
 user_sessions = {}
+
+# ═══ AIDENTIKA API ═══
+
+async def aidentika_analyze(image_url: str) -> dict:
+    """Анализирует фото товара — определяет категорию, название, качества. Бесплатно!"""
+    headers = {
+        "Authorization": f"Bearer {AIDENTIKA_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.post(
+            f"{AIDENTIKA_BASE}/analyze",
+            headers=headers,
+            json={"image": {"url": image_url}}
+        )
+        if r.status_code == 200:
+            return r.json()
+        else:
+            logger.error(f"Aidentika analyze ошибка: {r.status_code} {r.text[:200]}")
+            return {}
+
+async def aidentika_upload(image_b64: str) -> str:
+    """Загружает фото на Aidentika и возвращает upload_id"""
+    headers = {
+        "Authorization": f"Bearer {AIDENTIKA_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.post(
+            f"{AIDENTIKA_BASE}/upload",
+            headers=headers,
+            json={"image": {"data": image_b64, "media_type": "image/jpeg"}}
+        )
+        if r.status_code == 200:
+            return r.json().get("upload_id", "")
+        else:
+            logger.error(f"Aidentika upload ошибка: {r.status_code} {r.text[:200]}")
+            return ""
+
+async def aidentika_generate_card(upload_id: str, product_name: str, features: str, style: str = "classic") -> str:
+    """Генерирует карточку товара через Aidentika. Возвращает action_id"""
+    headers = {
+        "Authorization": f"Bearer {AIDENTIKA_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "images": [{"data": upload_id}],
+        "product_name": product_name,
+        "user_text": features,
+        "style": style,
+        "aspect_ratio": "3:4"
+    }
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.post(
+            f"{AIDENTIKA_BASE}/generate/card",
+            headers=headers,
+            json=payload
+        )
+        if r.status_code == 200:
+            action_id = str(r.json().get("action_id", ""))
+            logger.info(f"✅ Aidentika карточка запущена: action_id={action_id}")
+            return action_id
+        else:
+            logger.error(f"Aidentika generate_card ошибка: {r.status_code} {r.text[:200]}")
+            return ""
+
+async def aidentika_generate_photo(upload_id: str, comment: str = "") -> str:
+    """Генерирует фото товара на красивом фоне. Возвращает action_id"""
+    headers = {
+        "Authorization": f"Bearer {AIDENTIKA_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "images": [{"data": upload_id}],
+        "aspect_ratio": "3:4",
+        "photo_style": "classic"
+    }
+    if comment:
+        payload["comment"] = comment
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.post(
+            f"{AIDENTIKA_BASE}/generate/photo",
+            headers=headers,
+            json=payload
+        )
+        if r.status_code == 200:
+            action_id = str(r.json().get("action_id", ""))
+            logger.info(f"✅ Aidentika фото запущено: action_id={action_id}")
+            return action_id
+        else:
+            logger.error(f"Aidentika generate_photo ошибка: {r.status_code} {r.text[:200]}")
+            return ""
+
+async def aidentika_check_status(action_id: str) -> dict:
+    """Проверяем статус генерации"""
+    headers = {"Authorization": f"Bearer {AIDENTIKA_API_KEY}"}
+    async with httpx.AsyncClient(timeout=15) as client:
+        r = await client.get(
+            f"{AIDENTIKA_BASE}/status/{action_id}",
+            headers=headers
+        )
+        if r.status_code == 200:
+            return r.json()
+        return {}
+
+async def aidentika_download(action_id: str) -> bytes:
+    """Скачиваем готовое изображение"""
+    headers = {"Authorization": f"Bearer {AIDENTIKA_API_KEY}"}
+    async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+        r = await client.get(
+            f"{AIDENTIKA_BASE}/results/{action_id}/download",
+            headers=headers
+        )
+        if r.status_code == 200:
+            return r.content
+        return b""
+
+async def aidentika_wait_and_download(action_id: str, max_wait: int = 120) -> bytes:
+    """Ждём завершения генерации и скачиваем результат"""
+    await asyncio.sleep(20)  # первый запрос не раньше 20 сек
+    waited = 20
+    while waited < max_wait:
+        status = await aidentika_check_status(action_id)
+        if status.get("status") == "completed":
+            return await aidentika_download(action_id)
+        elif status.get("status") == "failed":
+            logger.error(f"Aidentika генерация упала: {status}")
+            return b""
+        await asyncio.sleep(10)
+        waited += 10
+    logger.error(f"Aidentika timeout action_id={action_id}")
+    return b""
+
+async def aidentika_balance() -> int:
+    """Проверяем баланс искр"""
+    headers = {"Authorization": f"Bearer {AIDENTIKA_API_KEY}"}
+    async with httpx.AsyncClient(timeout=10) as client:
+        r = await client.get(f"{AIDENTIKA_BASE}/balance", headers=headers)
+        if r.status_code == 200:
+            return r.json().get("available", 0)
+        return -1
 
 HEADERS_LIST = [
     {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/122.0.0.0 Safari/537.36", "Accept-Language": "ru-RU,ru;q=0.9"},
@@ -1120,10 +1263,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     product      = ""
 
     if update.message.photo:
-        await update.message.reply_text(
-            "📸 *Фото получено!*\n\n⏳ Генерирую карточку...",
-            parse_mode='Markdown'
-        )
         photo      = update.message.photo[-1]
         photo_file = await context.bot.get_file(photo.file_id)
         with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
@@ -1134,11 +1273,77 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             os.unlink(tmp.name)
         product = update.message.caption or "товар на фото"
 
+        # ─── Если есть Aidentika — используем его для визуала ───
+        if AIDENTIKA_API_KEY:
+            await update.message.reply_text(
+                "📸 *Фото получено!*\n\n"
+                "🎨 Генерирую профессиональную карточку через Aidentika...\n"
+                "⏳ Обычно 30-60 секунд",
+                parse_mode='Markdown'
+            )
+            try:
+                # 1. Загружаем фото на Aidentika
+                upload_id = await aidentika_upload(image_base64)
+                if not upload_id:
+                    raise Exception("Не удалось загрузить фото")
+
+                # 2. Анализируем товар бесплатно
+                # analyze не принимает upload_id — пропускаем, используем Anthropic для текста
+                # 3. Генерируем текст карточки через Anthropic
+                text_result = await generate_card(product, marketplace, image_base64)
+                card_data = list(text_result.values())[0] if marketplace == "all" else text_result
+                features_text = "\n".join(card_data.get("преимущества", [])[:5]) if isinstance(card_data, dict) else product
+
+                # 4. Запускаем генерацию карточки через Aidentika
+                action_id = await aidentika_generate_card(
+                    upload_id,
+                    product_name=product[:100],
+                    features=features_text,
+                    style="classic"
+                )
+
+                if action_id:
+                    await update.message.reply_text("⏳ Карточка генерируется, жди...")
+                    img_bytes = await aidentika_wait_and_download(action_id)
+
+                    if img_bytes:
+                        # Отправляем готовую карточку
+                        await context.bot.send_photo(
+                            chat_id=update.effective_chat.id,
+                            photo=io.BytesIO(img_bytes),
+                            caption=f"🎨 *Карточка Aidentika готова!*\n\n_{product[:60]}_",
+                            parse_mode='Markdown'
+                        )
+                        # Также отправляем текстовое описание
+                        await send_card_result(update.message, text_result, marketplace, product, context.bot, user_id)
+                        user_sessions[user_id]['step'] = 'done'
+
+                        # Проверяем остаток искр
+                        balance = await aidentika_balance()
+                        if balance >= 0 and balance < 8:
+                            await update.message.reply_text(
+                                f"⚠️ Осталось {balance} искр — пополни баланс на aidentika.com!"
+                            )
+                        return
+                    else:
+                        await update.message.reply_text("⚠️ Aidentika не ответила, генерирую через AI...")
+                else:
+                    await update.message.reply_text("⚠️ Ошибка Aidentika, генерирую через AI...")
+
+            except Exception as e:
+                logger.error(f"Aidentika ошибка: {e}")
+                await update.message.reply_text("⚠️ Aidentika недоступна, генерирую через AI...")
+        else:
+            await update.message.reply_text(
+                "📸 *Фото получено!*\n\n⏳ Генерирую карточку...",
+                parse_mode='Markdown'
+            )
+
     elif update.message.text:
         product = update.message.text
         await update.message.reply_text(
             f"⏳ Генерирую карточку для *{product[:40]}*...\n\n"
-            f"_Совет: пришли фото — инфографика будет лучше!_",
+            f"_Совет: пришли фото — Aidentika сделает красивый визуал!_",
             parse_mode='Markdown'
         )
     else:

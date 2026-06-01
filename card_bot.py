@@ -842,32 +842,42 @@ async def send_stars_invoice(update, context, stars, title, description):
 
 # ═══ ОТПРАВКА РЕЗУЛЬТАТА ═══
 
-async def send_card_result(message, result, marketplace, product, bot, user_id=None):
+async def send_card_result(message, result, marketplace, product, bot, user_id=None, skip_image=False):
+    """
+    skip_image=True — когда уже отправили карточку через Aidentika,
+    не надо запускать старый Gemini генератор
+    """
     if marketplace == "all":
         for mp, data in result.items():
             await bot.send_message(chat_id=message.chat_id, text=format_card(data, mp)[:4000], parse_mode='Markdown')
             await asyncio.sleep(0.5)
-        mp0, data0 = list(result.keys())[0], list(result.values())[0]
-        photo_b = user_sessions.get(user_id, {}).get("last_photo_bytes") if user_id else None
-        img_bytes = await generate_product_image(product, data0, mp0, "studio", photo_b)
-        await bot.send_photo(
-            chat_id=message.chat_id, photo=img_bytes,
-            caption="🖼 *Инфографика готова!*\n\n💡 Выбери стиль:",
-            parse_mode='Markdown',
-            reply_markup=InlineKeyboardMarkup(_style_keyboard("studio", product[:15]))
-        )
+        # Старый генератор запускаем только если нет Aidentika
+        if not skip_image:
+            mp0, data0 = list(result.keys())[0], list(result.values())[0]
+            photo_b = user_sessions.get(user_id, {}).get("last_photo_bytes") if user_id else None
+            img_bytes = await generate_product_image(product, data0, mp0, "studio", photo_b)
+            if img_bytes:
+                await bot.send_photo(
+                    chat_id=message.chat_id, photo=img_bytes,
+                    caption="🖼 *Инфографика готова!*\n\n💡 Выбери стиль:",
+                    parse_mode='Markdown',
+                    reply_markup=InlineKeyboardMarkup(_style_keyboard("studio", product[:15]))
+                )
     else:
         await bot.send_message(chat_id=message.chat_id, text=format_card(result, marketplace)[:4000], parse_mode='Markdown')
-        photo_b = user_sessions.get(user_id, {}).get("last_photo_bytes") if user_id else None
-        img_bytes = await generate_product_image(product, result, marketplace, "studio", photo_b)
-        await bot.send_photo(
-            chat_id=message.chat_id, photo=img_bytes,
-            caption=(f"🖼 *Студийный стиль*\n\n"
-                     f"✅ {'На основе вашего фото!' if photo_b else 'Инфографика готова!'}\n\n"
-                     f"💡 Выбери другой стиль:"),
-            parse_mode='Markdown',
-            reply_markup=InlineKeyboardMarkup(_style_keyboard("studio", product[:15]))
-        )
+        # Старый генератор запускаем только если нет Aidentika
+        if not skip_image:
+            photo_b = user_sessions.get(user_id, {}).get("last_photo_bytes") if user_id else None
+            img_bytes = await generate_product_image(product, result, marketplace, "studio", photo_b)
+            if img_bytes:
+                await bot.send_photo(
+                    chat_id=message.chat_id, photo=img_bytes,
+                    caption=(f"🖼 *Студийный стиль*\n\n"
+                             f"✅ {'На основе вашего фото!' if photo_b else 'Инфографика готова!'}\n\n"
+                             f"💡 Выбери другой стиль:"),
+                    parse_mode='Markdown',
+                    reply_markup=InlineKeyboardMarkup(_style_keyboard("studio", product[:15]))
+                )
 
 def _style_keyboard(current_style, product_short):
     rows = []
@@ -1294,28 +1304,46 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 card_data = list(text_result.values())[0] if marketplace == "all" else text_result
                 features_text = "\n".join(card_data.get("преимущества", [])[:5]) if isinstance(card_data, dict) else product
 
-                # 4. Запускаем генерацию карточки через Aidentika
-                action_id = await aidentika_generate_card(
-                    upload_id,
-                    product_name=product[:100],
-                    features=features_text,
-                    style="classic"
+                # 4. Запускаем генерацию карточки — ДВА ВАРИАНТА параллельно
+                action_classic, action_premium = await asyncio.gather(
+                    aidentika_generate_card(upload_id, product_name=product[:100], features=features_text, style="classic"),
+                    aidentika_generate_card(upload_id, product_name=product[:100], features=features_text, style="premium")
                 )
 
-                if action_id:
-                    await update.message.reply_text("⏳ Карточка генерируется, жди...")
-                    img_bytes = await aidentika_wait_and_download(action_id)
+                if action_classic or action_premium:
+                    await update.message.reply_text("⏳ Генерирую 2 варианта карточки...")
 
-                    if img_bytes:
-                        # Отправляем готовую карточку
+                    # Ждём оба результата параллельно
+                    async def empty(): return b""
+                    results = await asyncio.gather(
+                        aidentika_wait_and_download(action_classic) if action_classic else empty(),
+                        aidentika_wait_and_download(action_premium) if action_premium else empty()
+                    )
+                    img_classic, img_premium = results
+
+                    sent_any = False
+
+                    if img_classic:
                         await context.bot.send_photo(
                             chat_id=update.effective_chat.id,
-                            photo=io.BytesIO(img_bytes),
-                            caption=f"🎨 *Карточка Aidentika готова!*\n\n_{product[:60]}_",
+                            photo=io.BytesIO(img_classic),
+                            caption=f"🎨 *Вариант 1 — Классический*\n\n_{product[:60]}_",
                             parse_mode='Markdown'
                         )
-                        # Также отправляем текстовое описание
-                        await send_card_result(update.message, text_result, marketplace, product, context.bot, user_id)
+                        sent_any = True
+
+                    if img_premium:
+                        await context.bot.send_photo(
+                            chat_id=update.effective_chat.id,
+                            photo=io.BytesIO(img_premium),
+                            caption=f"✨ *Вариант 2 — Премиум*\n\n_{product[:60]}_",
+                            parse_mode='Markdown'
+                        )
+                        sent_any = True
+
+                    if sent_any:
+                        # Текстовое описание без старого генератора
+                        await send_card_result(update.message, text_result, marketplace, product, context.bot, user_id, skip_image=True)
                         user_sessions[user_id]['step'] = 'done'
 
                         # Проверяем остаток искр

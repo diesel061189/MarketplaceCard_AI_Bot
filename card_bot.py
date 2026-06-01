@@ -40,6 +40,38 @@ user_sessions = {}
 
 # ═══ AIDENTIKA API ═══
 
+async def lilu_check_card_quality(product: str, features: str) -> str:
+    """
+    Лила оценивает нужен ли премиум вариант карточки.
+    Возвращает 'classic' или 'premium'
+    """
+    try:
+        prompt = f"""Товар: {product}
+Характеристики: {features[:300]}
+
+Оцени одним словом — нужен ли премиум дизайн карточки для этого товара?
+Ответь ТОЛЬКО: classic или premium
+
+premium — если товар премиальный (косметика, украшения, техника, бренды)
+classic — если обычный товар (хозтовары, простые гаджеты, еда)"""
+
+        headers = {
+            "x-api-key": ANTHROPIC_API_KEY,
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json"
+        }
+        payload = {
+            "model": ANTHROPIC_HAIKU,
+            "max_tokens": 10,
+            "messages": [{"role": "user", "content": prompt}]
+        }
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.post(ANTHROPIC_URL, headers=headers, json=payload)
+            verdict = r.json()["content"][0]["text"].strip().lower()
+            return "premium" if "premium" in verdict else "classic"
+    except:
+        return "classic"  # по умолчанию экономим искры
+
 async def aidentika_analyze(image_url: str) -> dict:
     """Анализирует фото товара — определяет категорию, название, качества. Бесплатно!"""
     headers = {
@@ -1304,49 +1336,59 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 card_data = list(text_result.values())[0] if marketplace == "all" else text_result
                 features_text = "\n".join(card_data.get("преимущества", [])[:5]) if isinstance(card_data, dict) else product
 
-                # 4. Запускаем генерацию карточки — ДВА ВАРИАНТА параллельно
-                action_classic, action_premium = await asyncio.gather(
-                    aidentika_generate_card(upload_id, product_name=product[:100], features=features_text, style="classic"),
-                    aidentika_generate_card(upload_id, product_name=product[:100], features=features_text, style="premium")
+                # 4. Генерируем сначала classic (4 искры)
+                action_classic = await aidentika_generate_card(
+                    upload_id,
+                    product_name=product[:100],
+                    features=features_text,
+                    style="classic"
                 )
 
-                if action_classic or action_premium:
-                    await update.message.reply_text("⏳ Генерирую 2 варианта карточки...")
-
-                    # Ждём оба результата параллельно
-                    async def empty(): return b""
-                    results = await asyncio.gather(
-                        aidentika_wait_and_download(action_classic) if action_classic else empty(),
-                        aidentika_wait_and_download(action_premium) if action_premium else empty()
-                    )
-                    img_classic, img_premium = results
-
-                    sent_any = False
+                if action_classic:
+                    await update.message.reply_text("⏳ Генерирую карточку...")
+                    img_classic = await aidentika_wait_and_download(action_classic)
 
                     if img_classic:
-                        await context.bot.send_photo(
-                            chat_id=update.effective_chat.id,
-                            photo=io.BytesIO(img_classic),
-                            caption=f"🎨 *Вариант 1 — Классический*\n\n_{product[:60]}_",
-                            parse_mode='Markdown'
-                        )
-                        sent_any = True
+                        # Лила оценивает — нужен ли премиум
+                        lilu_verdict = await lilu_check_card_quality(product, features_text)
 
-                    if img_premium:
-                        await context.bot.send_photo(
-                            chat_id=update.effective_chat.id,
-                            photo=io.BytesIO(img_premium),
-                            caption=f"✨ *Вариант 2 — Премиум*\n\n_{product[:60]}_",
-                            parse_mode='Markdown'
-                        )
-                        sent_any = True
+                        if lilu_verdict == "premium":
+                            # Генерируем премиум дополнительно
+                            await update.message.reply_text("✨ Лила решила показать тебе премиум вариант...")
+                            action_premium = await aidentika_generate_card(
+                                upload_id,
+                                product_name=product[:100],
+                                features=features_text,
+                                style="premium"
+                            )
+                            img_premium = await aidentika_wait_and_download(action_premium) if action_premium else b""
 
-                    if sent_any:
-                        # Текстовое описание без старого генератора
+                            if img_classic:
+                                await context.bot.send_photo(
+                                    chat_id=update.effective_chat.id,
+                                    photo=io.BytesIO(img_classic),
+                                    caption=f"🎨 *Вариант 1 — Классический*\n\n_{product[:60]}_",
+                                    parse_mode='Markdown'
+                                )
+                            if img_premium:
+                                await context.bot.send_photo(
+                                    chat_id=update.effective_chat.id,
+                                    photo=io.BytesIO(img_premium),
+                                    caption=f"✨ *Вариант 2 — Премиум*\n\n_{product[:60]}_",
+                                    parse_mode='Markdown'
+                                )
+                        else:
+                            # Только classic — достаточно
+                            await context.bot.send_photo(
+                                chat_id=update.effective_chat.id,
+                                photo=io.BytesIO(img_classic),
+                                caption=f"🎨 *Карточка готова!*\n\n_{product[:60]}_",
+                                parse_mode='Markdown'
+                            )
+
                         await send_card_result(update.message, text_result, marketplace, product, context.bot, user_id, skip_image=True)
                         user_sessions[user_id]['step'] = 'done'
 
-                        # Проверяем остаток искр
                         balance = await aidentika_balance()
                         if balance >= 0 and balance < 8:
                             await update.message.reply_text(
